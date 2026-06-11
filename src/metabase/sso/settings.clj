@@ -315,16 +315,20 @@
 (defsetting oidc-login-providers
   (deferred-tru "Public list of enabled OIDC providers for the login page.")
   :type       :json
+  :default    []
   :visibility :public
   :setter     :none
   :getter     (fn []
-                (when (oidc-enabled)
-                  (for [provider (oidc-providers)
-                        :when (:enabled provider)]
-                    (let [site-url (system/site-url)]
-                      {:key (str (:key provider))
-                       :login-prompt (str (:login-prompt provider))
-                       :sso-url (str site-url "/auth/sso/" (:key provider))})))))
+                (if (oidc-enabled)
+                  (into []
+                        (comp (filter :enabled)
+                              (map (fn [provider]
+                                     (let [site-url (system/site-url)]
+                                       {:key (str (:key provider))
+                                        :login-prompt (str (:login-prompt provider))
+                                        :sso-url (str site-url "/auth/sso/" (:key provider))}))))
+                        (oidc-providers))
+                  [])))
 
 (defn- ee-sso-configured? []
   (when config/ee-available?

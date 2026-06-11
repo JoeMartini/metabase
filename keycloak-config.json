@@ -1,0 +1,12 @@
+{
+  "realm": "martini",
+  "auth-server-url": "https://auth.home.martini.wang:50443",
+  "resource": "metabase",
+  "credentials": {
+    "secret": "REPLACE_WITH_ACTUAL_SECRET"
+  },
+  "confidential-port": 0,
+  "ssl-required": "external",
+  "use-resource-role-mappings": false,
+  "principal-attribute": "preferred_username"
+}
