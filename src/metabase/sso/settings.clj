@@ -324,7 +324,7 @@
                     (let [site-url (system/site-url)]
                       {:key (str (:key provider))
                        :login-prompt (str (:login-prompt provider))
-                       :sso-url (str site-url "/auth/sso/" (:key provider))}))))
+                       :sso-url (str site-url "/auth/sso/" (:key provider))})))))
 
 (defn- ee-sso-configured? []
   (when config/ee-available?
