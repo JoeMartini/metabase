@@ -101,7 +101,7 @@
   [_provider request]
   (let [config (or (oidc.common/extract-oidc-config request)
                    (when-let [provider-key (:oidc-provider-key request)]
-                     (sso.settings/get-oidc-provider provider-key)))
+                     (sso.settings/get-oidc-provider provider-key)))]
     (cond
       ;; Configuration missing
       (not config)
