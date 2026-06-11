@@ -24,6 +24,8 @@
   google-auth-client-id
   google-auth-enabled
   ldap-enabled
+  oidc-enabled
+  get-oidc-provider
   send-new-sso-user-admin-email?
   sso-enabled?
   sso-source-enabled?])

@@ -4,6 +4,7 @@
    [metabase.config.core :as config]
    [metabase.premium-features.core :as premium-features]
    [metabase.settings.core :as setting :refer [defsetting define-multi-setting define-multi-setting-impl]]
+   [metabase.system.core :as system]
    [metabase.util :as u]
    [metabase.util.i18n :refer [deferred-tru tru]]
    [metabase.util.json :as json]
@@ -281,6 +282,50 @@
               (assert (#{:allow-all :allow-private :external-only} (keyword new-value))))
             (setting/set-value-of-type! :keyword :oidc-allowed-networks new-value)))
 
+
+;;; -------------------------------------------------- OIDC Settings --------------------------------------------------
+
+(defsetting oidc-providers
+  (deferred-tru "JSON array of OIDC provider configurations.")
+  :type       :json
+  :default    []
+  :encryption :when-encryption-key-set
+  :audit      :getter
+  :getter     (fn []
+                (json/decode (setting/get-value-of-type :string :oidc-providers) keyword)))
+
+(defn get-oidc-provider
+  "Get an OIDC provider by its key from the configured providers."
+  [provider-key]
+  (some #(when (= (:key %) provider-key) %) (oidc-providers)))
+
+(defsetting oidc-enabled
+  (deferred-tru "Is OIDC authentication currently enabled?")
+  :type       :boolean
+  :visibility :public
+  :setter     (fn [new-value]
+                (if-let [new-value (boolean new-value)]
+                  (if-not (seq (oidc-providers))
+                    (throw (ex-info (tru "OIDC is not configured. Please configure at least one provider first.")
+                                    {:status-code 400}))
+                    (setting/set-value-of-type! :boolean :oidc-enabled new-value))
+                  (setting/set-value-of-type! :boolean :oidc-enabled new-value)))
+  :default    false
+  :audit      :getter)
+(defsetting oidc-login-providers
+  (deferred-tru "Public list of enabled OIDC providers for the login page.")
+  :type       :json
+  :visibility :public
+  :setter     :none
+  :getter     (fn []
+                (when (oidc-enabled)
+                  (for [provider (oidc-providers)
+                        :when (:enabled provider)]
+                    (let [site-url (system/site-url)]
+                      {:key (str (:key provider))
+                       :login-prompt (str (:login-prompt provider))
+                       :sso-url (str site-url "/auth/sso/" (:key provider))}))))
+
 (defn- ee-sso-configured? []
   (when config/ee-available?
     (or (setting/get :other-sso-enabled?)
@@ -291,6 +336,7 @@
   []
   (or (google-auth-enabled)
       (ldap-enabled)
+      (oidc-enabled)
       (ee-sso-configured?)))
 
 (defn sso-source-enabled?

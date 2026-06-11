@@ -9,6 +9,7 @@
    [metabase.sso.oidc.schema :as oidc.schema]
    [metabase.sso.oidc.state :as oidc.state]
    [metabase.sso.oidc.tokens :as oidc.tokens]
+   [metabase.sso.settings :as sso.settings]
    [metabase.util.log :as log]
    [methodical.core :as methodical]))
 
@@ -98,7 +99,9 @@
 
 (methodical/defmethod auth-identity/authenticate :provider/oidc
   [_provider request]
-  (let [config (oidc.common/extract-oidc-config request)]
+  (let [config (or (oidc.common/extract-oidc-config request)
+                   (when-let [provider-key (:oidc-provider-key request)]
+                     (sso.settings/get-oidc-provider provider-key)))
     (cond
       ;; Configuration missing
       (not config)
