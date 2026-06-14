@@ -756,7 +756,8 @@
         (and (:enabled-for-db? setting-def) (not *database*))
         (log/warnf "Skipping enabled-for-db? check for %s as we don't have the underlying toucan2 db instance."
                    (:name setting-def))))
-    (if (or (and feature (not (has-feature? feature)))
+    (if (or (and feature (not (has-feature? feature))
+            (not (#{:oidc-providers :oidc-enabled :oidc-login-providers} (:name setting-def))))
             (and enabled? (not (enabled?)))
             (and *database* (disabled-for-db-reasons? setting-def *database*)))
       (:default setting-def)

@@ -109,7 +109,7 @@
                   (map? new-value)
                   (do
                     (doseq [k (keys new-value)]
-                      (when-not (instance? DN k) ; handle DN-encoded keys like we get from the `:getter`
+                      (when-not (instance? DN k) ; handle DN-encoded keys like we get from the :getter
                         (when-not (DN/isValidDN (u/qualified-name k))
                           (throw (IllegalArgumentException. (tru "{0} is not a valid DN." (u/qualified-name k)))))))
                     (setting/set-value-of-type! :json :ldap-group-mappings new-value)))))
@@ -288,11 +288,10 @@
 (defsetting oidc-providers
   (deferred-tru "JSON array of OIDC provider configurations.")
   :type       :json
+  :visibility :public
   :default    []
   :encryption :when-encryption-key-set
-  :audit      :getter
-  :getter     (fn []
-                (json/decode (setting/get-value-of-type :string :oidc-providers) keyword)))
+  :audit      :getter)
 
 (defn get-oidc-provider
   "Get an OIDC provider by its key from the configured providers."
@@ -312,6 +311,7 @@
                   (setting/set-value-of-type! :boolean :oidc-enabled new-value)))
   :default    false
   :audit      :getter)
+
 (defsetting oidc-login-providers
   (deferred-tru "Public list of enabled OIDC providers for the login page.")
   :type       :json

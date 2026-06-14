@@ -21,6 +21,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install wget apt-transport-h
 
 ENV PATH="/root/.local/bin:$PATH"
 
+COPY build-uber-log4j2-handler /build-uber-log4j2-handler
 COPY . .
 
 # version is pulled from git, but git doesn't trust the directory due to different owners
@@ -30,6 +31,7 @@ RUN git config --global --add safe.directory /home/node
 RUN npm install -g bun
 
 # install frontend dependencies
+ENV CYPRESS_INSTALL_BINARY=0
 RUN bun install --frozen-lockfile
 
 RUN INTERACTIVE=false CI=true MB_EDITION=$MB_EDITION bin/build.sh :version ${VERSION}

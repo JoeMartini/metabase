@@ -60,14 +60,16 @@ export const Login = ({ params, location }: LoginProps): JSX.Element => {
               <provider.Button isCard={true} redirectUrl={redirectUrl} />
             </Box>
           ))}
-          {passwordProvider.map((provider) => (
+          {passwordProvider.length > 0 && otherProviders.length === 0 && (
             <>
               <Divider mt="2rem" />
-              <Box key={provider.name} mt="1rem" ta="center">
-                <provider.Button isCard={true} redirectUrl={redirectUrl} />
-              </Box>
+              {passwordProvider.map((provider) => (
+                <Box key={provider.name} mt="1rem" ta="center">
+                  <provider.Button isCard={true} redirectUrl={redirectUrl} />
+                </Box>
+              ))}
             </>
-          ))}
+          )}
         </Box>
       )}
     </AuthLayout>

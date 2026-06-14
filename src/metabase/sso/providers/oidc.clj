@@ -46,16 +46,17 @@
    Parameters:
    - code: Authorization code
    - config: Enriched OIDC configuration with discovery document (if applicable),
-             token endpoint, client credentials, redirect URI
+             token endpoint, client credentials
+   - redirect-uri: The redirect URI used in the authorization request
 
    Returns token response map with :id-token, :access-token, etc."
-  [code config]
+  [code config redirect-uri]
   (let [token-endpoint (oidc.discovery/get-token-endpoint config)]
     (try
       (let [response (oidc.http/oidc-post token-endpoint
                                           {:form-params {:grant_type "authorization_code"
                                                          :code code
-                                                         :redirect_uri (:redirect-uri config)
+                                                         :redirect_uri redirect-uri
                                                          :client_id (:client-id config)
                                                          :client_secret (:client-secret config)}})]
         (if (= 200 (:status response))
@@ -99,9 +100,9 @@
 
 (methodical/defmethod auth-identity/authenticate :provider/oidc
   [_provider request]
-  (let [config (or (oidc.common/extract-oidc-config request)
-                   (when-let [provider-key (:oidc-provider-key request)]
-                     (sso.settings/get-oidc-provider provider-key)))]
+  (let [config (or (when-let [provider-key (:oidc-provider-key request)]
+                     (sso.settings/get-oidc-provider provider-key))
+                   (oidc.common/extract-oidc-config request))]
     (cond
       ;; Configuration missing
       (not config)
@@ -119,8 +120,9 @@
            :message (get-in validation [:error :description] "Invalid callback parameters")}
           ;; Enrich config with discovery once for the entire callback flow
           (let [enriched-config (enrich-config-with-discovery config)
+                redirect-uri (or (:redirect-uri request) (:redirect-uri config))
                 code (:code validation)
-                tokens (exchange-code-for-tokens code enriched-config)]
+                tokens (exchange-code-for-tokens code enriched-config redirect-uri)]
             (if-not (:id-token tokens)
               {:success? false
                :error :token-exchange-failed
@@ -154,6 +156,7 @@
       ;; Initiate authorization flow
       :else
       (let [enriched-config (enrich-config-with-discovery config)
+                redirect-uri (or (:redirect-uri request) (:redirect-uri config))
             authorization-endpoint (oidc.discovery/get-authorization-endpoint enriched-config)]
         (if-not authorization-endpoint
           {:success? false
@@ -163,10 +166,11 @@
           (let [state (oidc.common/generate-state)
                 nonce (oidc.common/generate-nonce)
                 scopes (get config :scopes ["openid" "email" "profile"])
+                redirect-uri (or (:redirect-uri request) (:redirect-uri config))
                 auth-url (oidc.common/generate-authorization-url
                           authorization-endpoint
                           (:client-id config)
-                          (:redirect-uri config)
+                          redirect-uri
                           scopes
                           state
                           nonce)]

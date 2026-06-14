@@ -34,17 +34,21 @@ export const PasswordPanel = ({ redirectUrl }: PasswordPanelProps) => {
 
   return (
     <div>
-      <LoginForm
-        isLdapEnabled={isLdapEnabled}
-        hasSessionCookies={hasSessionCookies}
-        onSubmit={handleSubmit}
-      />
+      {providers.length === 0 && (
+        <LoginForm
+          isLdapEnabled={isLdapEnabled}
+          hasSessionCookies={hasSessionCookies}
+          onSubmit={handleSubmit}
+        />
+      )}
       <ActionList>
-        <ActionListItem>
-          <AuthButton link="/auth/forgot_password">
-            {t`I seem to have forgotten my password`}
-          </AuthButton>
-        </ActionListItem>
+        {providers.length === 0 && (
+          <ActionListItem>
+            <AuthButton link="/auth/forgot_password">
+              {t`I seem to have forgotten my password`}
+            </AuthButton>
+          </ActionListItem>
+        )}
         {providers.map((provider) => (
           <ActionListItem key={provider.name}>
             <provider.Button redirectUrl={redirectUrl} />

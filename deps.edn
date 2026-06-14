@@ -82,9 +82,7 @@
   inflections/inflections                   {:mvn/version "0.15.0"}             ; Clojure/Script library used for prularizing words
   instaparse/instaparse                     {:mvn/version "1.5.0"}              ; Make your own parser
   io.github.camsaul/toucan2                 {:mvn/version "1.0.571"}
-  io.github.eerohele/pp                     {#_#_:git/tag "2024-11-13.77"       ; super fast pretty-printing library
-                                             :git/sha "ffc4edc482c057cd9412c62f018a41e9140c618b"
-                                             :git/url "https://github.com/eerohele/pp"}
+  io.github.eerohele/pp {:local/root "deps-pp"}
   io.github.metabase/macaw                  {:mvn/version "0.2.36"}             ; Parse native SQL queries
   io.prometheus/simpleclient_hotspot        {:mvn/version "0.16.0"}             ; prometheus jvm collector
   junegunn/grouper                          {:mvn/version "0.1.1"}              ; Batch processing helper
@@ -100,8 +98,7 @@
                                                           org.bouncycastle/bcprov-jdk18on]}
   metabase/throttle                         {:mvn/version "1.0.2"}              ; Tools for throttling access to API endpoints and other code pathways
   methodical/methodical                     {:mvn/version "1.0.127"}            ; drop-in replacements for Clojure multimethods and adds several advanced features
-  metosin/malli                             {:git/url "https://github.com/metabase/malli" ; Data-driven Schemas for Clojure/Script and babashka
-                                             :git/sha "b4a2d78647a049870b316753d7aae7fb4ade3ae5"} ; patched to resolve an issue causing OOM
+  metosin/malli {:local/root "deps-malli"}
   net.carcdr/oidc-provider                  {:mvn/version "0.6.2"}              ; OAuth/OIDC server abstract implementation
   net.cgrand/macrovich                      {:mvn/version "0.2.2"}              ; utils for writing macros for both Clojure & ClojureScript
   net.redhogs.cronparser/cron-parser-core   {:mvn/version "3.5"                 ; describe Cron schedule in human-readable language
@@ -186,8 +183,7 @@
   pretty/pretty                             {:mvn/version "1.0.5"}              ; protocol for defining how custom types should be pretty printed
   ;; Dependency below is our fork of redux - utility functions for building and composing transducers. The
   ;; group/artifact name is the same as with the upstream so that it overrides the original dependency everywhere.
-  redux/redux                               {:git/url "https://github.com/metabase/redux"
-                                             :sha "4a37feaf817a2a6b5ef688c927f6fd4375964433"}
+  redux/redux {:local/root "deps-redux"}
   riddley/riddley                           {:mvn/version "0.2.0"}              ; code walking lib -- used interally by Potemkin, manifold, etc.
   ring/ring-core                            {:mvn/version "1.15.3"}             ; HTTP abstraction
   ring/ring-jetty-adapter                   {:mvn/version "1.15.3"              ; Ring adapter for Jetty
@@ -785,7 +781,7 @@
     io.github.borkdude/grasp          {:mvn/version "0.1.4"}
     io.github.clojure/tools.build     {:mvn/version "0.10.11"}
     io.github.seancorfield/build-uber-log4j2-handler
-    {:git/tag "v2.25.1" :git/sha "1cfab45"}                                     ; collect binary files for log4j2
+    {:local/root "build-uber-log4j2-handler"}                                     ; collect binary files for log4j2
     org.clojure/data.xml              {:mvn/version "0.2.0-alpha10"}
     org.clojure/tools.deps.alpha      {:mvn/version "0.15.1254"}
     org.fedorahosted.tennera/jgettext {:mvn/version "0.15.1"}}
