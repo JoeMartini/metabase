@@ -1,5 +1,7 @@
 # Metabase
 
+> 🍴 **This fork adds Community OIDC SSO integration** — authenticate users via Keycloak (or any OIDC provider) without requiring an Enterprise license. See [OIDC Integration](#oidc-integration) below.
+
 [Metabase](https://www.metabase.com) is the easy, open-source way for everyone in your company to ask questions and learn from data.
 
 ![Metabase Product Screenshot](https://www.metabase.com/images/metabase-product-screenshot-updated.png)
@@ -78,4 +80,46 @@ Unless otherwise noted, all files © 2026 Metabase, Inc.
 
 ## Metabase Experts
 
-If you’d like more technical resources to set up your data stack with Metabase, connect with a [Metabase Expert](https://www.metabase.com/partners/?utm_source=readme&utm_medium=metabase-expetrs&utm_campaign=readme).
+If you'd like more technical resources to set up your data stack with Metabase, connect with a [Metabase Expert](https://www.metabase.com/partners/?utm_source=readme&utm_medium=metabase-expetrs&utm_campaign=readme).
+
+---
+
+## OIDC Integration
+
+This fork (`feature/community-oidc`) adds **OIDC Single Sign-On for the Community Edition**, removing the Enterprise license requirement.
+
+### What was changed
+
+- **Backend** (`src/metabase/sso/providers/oidc.clj`):
+  - Fixed config lookup priority so `get-oidc-provider` (full config from settings) is used instead of the truncated `extract-oidc-config`
+  - Fixed `redirect-uri` propagation through authorization and token-exchange flows
+  - Ensures proper OIDC discovery and state cookie encryption
+
+- **Frontend** (`frontend/src/metabase/auth/components/Login/Login.tsx`):
+  - Hides the default "Sign in with email" block when OIDC providers are configured
+  - Shows a single "统一身份登录 (Keycloak)" button for a clean SSO experience
+
+- **Keycloak Client Configuration**:
+  - Adds `groups` client scope for role mapping
+  - Configures proper `redirect_uris` for the Metabase callback endpoint
+
+### How to use
+
+1. Build Metabase from this branch
+2. Set environment variables:
+   - `MB_SSO_OIDC_CLIENT_ID`
+   - `MB_SSO_OIDC_CLIENT_SECRET`
+   - `MB_SSO_OIDC_ISSUER_URI` (e.g., `https://auth.example.com/realms/myrealm`)
+   - `MB_ENCRYPTION_SECRET_KEY` (for state cookie encryption)
+3. Start Metabase and click the SSO button on the login page
+
+### Branches in this fork
+
+| Branch | Purpose |
+|--------|---------|
+| `master` | Tracks upstream Metabase master |
+| `feature/community-oidc` | Community OIDC SSO integration |
+
+### Author
+
+Maintained by [Hermes-Martini-Home](https://github.com/JoeMartini) · [Upstream sync record](https://app.notion.com/p/37fc7ae4e85381f890e0f65a70cc8b29)
