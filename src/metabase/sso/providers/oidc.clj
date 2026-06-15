@@ -3,6 +3,7 @@
    implementations (Auth0, Okta, etc.) can derive from."
   (:require
    [metabase.auth-identity.core :as auth-identity]
+   [metabase.sso.core :as sso]
    [metabase.sso.oidc.common :as oidc.common]
    [metabase.sso.oidc.discovery :as oidc.discovery]
    [metabase.sso.oidc.http :as oidc.http]
@@ -10,6 +11,7 @@
    [metabase.sso.oidc.state :as oidc.state]
    [metabase.sso.oidc.tokens :as oidc.tokens]
    [metabase.sso.settings :as sso.settings]
+   [metabase.util :as u]
    [metabase.util.log :as log]
    [methodical.core :as methodical]))
 
@@ -77,24 +79,48 @@
    - claims: ID token claims map
    - config: OIDC configuration (for custom attribute mappings)
 
-   Returns user data map with :email, :first_name, :last_name, :provider-id"
+   Returns user data map with :email, :first_name, :last_name, :provider-id, :groups"
   [claims config]
   (let [;; Get attribute mappings from config, or use defaults
         email-attr (get config :attribute-email "email")
         firstname-attr (get config :attribute-firstname "given_name")
         lastname-attr (get config :attribute-lastname "family_name")
+        groups-attr (get config :attribute-groups (sso.settings/oidc-attribute-groups))
 
         ;; Extract values
         email (get claims (keyword email-attr))
         first-name (get claims (keyword firstname-attr))
         last-name (get claims (keyword lastname-attr))
-        provider-id (:sub claims)]
+        provider-id (:sub claims)
+        groups (get claims (keyword groups-attr))]
     (when email
       {:email email
        :first_name first-name
        :last_name last-name
        :provider-id provider-id
-       :sso_source :oidc})))
+       :sso_source :oidc
+       :groups (when (seq groups) groups)})))
+
+;;; -------------------------------------------------- Group Sync --------------------------------------------------
+
+(defn- oidc-groups->mb-group-ids
+  "Translate a set of a user's OIDC groups to a set of MB group IDs using the configured mappings."
+  [oidc-groups]
+  (let [group-mappings (sso.settings/oidc-group-mappings)]
+    (->> oidc-groups
+         (map #(or (get group-mappings %)
+                   (get group-mappings (keyword %))))
+         (remove nil?)
+         flatten
+         set)))
+
+(defn- all-mapped-group-ids
+  "Returns the set of all MB group IDs that have configured OIDC mappings."
+  []
+  (-> (sso.settings/oidc-group-mappings)
+      vals
+      flatten
+      set))
 
 ;;; -------------------------------------------------- Authentication Implementation --------------------------------------------------
 
@@ -156,7 +182,7 @@
       ;; Initiate authorization flow
       :else
       (let [enriched-config (enrich-config-with-discovery config)
-                redirect-uri (or (:redirect-uri request) (:redirect-uri config))
+            redirect-uri (or (:redirect-uri request) (:redirect-uri config))
             authorization-endpoint (oidc.discovery/get-authorization-endpoint enriched-config)]
         (if-not authorization-endpoint
           {:success? false
@@ -166,7 +192,6 @@
           (let [state (oidc.common/generate-state)
                 nonce (oidc.common/generate-nonce)
                 scopes (get config :scopes ["openid" "email" "profile"])
-                redirect-uri (or (:redirect-uri request) (:redirect-uri config))
                 auth-url (oidc.common/generate-authorization-url
                           authorization-endpoint
                           (:client-id config)
@@ -185,24 +210,43 @@
 
 (methodical/defmethod auth-identity/login! :around :provider/oidc
   [provider {:keys [code state] :as request}]
-  ;; Only validate state for OIDC callbacks (when we have code and state parameters)
-  (if (and code state)
-    (let [;; Get provider-specific keyword from request or derive from provider
-          provider-keyword (or (:oidc-provider request) provider)
-          validation (oidc.state/validate-oidc-callback request
-                                                        state
-                                                        provider-keyword
-                                                        {:validate-browser-id (:browser-id request)})]
-      (if-not (:valid? validation)
-        {:success? false
-         :error (:error validation)
-         :message (:message validation)}
-        ;; Add nonce and redirect from validated state to request
-        ;; Use :oidc-nonce to avoid collision with CSP :nonce from security middleware
-        (next-method provider (cond-> (assoc request :oidc-nonce (:nonce validation))
-                                ;; Use redirect from state cookie if not already set in request
-                                (and (:redirect validation)
-                                     (not (:redirect-url request)))
-                                (assoc :redirect-url (:redirect validation))))))
-    ;; Not a callback - pass through to next method
-    (next-method provider request)))
+  (let [result (if (and code state)
+                 (let [;; Get provider-specific keyword from request or derive from provider
+                       provider-keyword (or (:oidc-provider request) provider)
+                       validation (oidc.state/validate-oidc-callback request
+                                                                   state
+                                                                   provider-keyword
+                                                                   {:validate-browser-id (:browser-id request)})]
+                   (if-not (:valid? validation)
+                     {:success? false
+                      :error (:error validation)
+                      :message (:message validation)}
+                     ;; Add nonce and redirect from validated state to request
+                     ;; Use :oidc-nonce to avoid collision with CSP :nonce from security middleware
+                     (next-method provider (cond-> (assoc request :oidc-nonce (:nonce validation))
+                                             ;; Use redirect from state cookie if not already set in request
+                                             (and (:redirect validation)
+                                                  (not (:redirect-url request)))
+                                             (assoc :redirect-url (:redirect validation))))))
+                 ;; Not a callback - pass through to next method
+                 (next-method provider request))]
+    ;; Sync OIDC group memberships after successful login
+    (log/infof "SYNC-GROUPS: result success=%s user=%s sync-enabled=%s groups=%s"
+               (:success? result) (get-in result [:user :id]) (sso.settings/oidc-group-sync)
+               (get-in result [:user-data :groups]))
+    (when (and (:success? result)
+               (:user result)
+               (sso.settings/oidc-group-sync))
+      (let [groups (get-in result [:user-data :groups])]
+        (when (seq groups)
+          (log/infof "SYNC-GROUPS: Syncing OIDC groups for user %s: %s" (get-in result [:user :id]) groups)
+          (try
+            (let [group-ids (oidc-groups->mb-group-ids groups)
+                  all-mapped-ids (all-mapped-group-ids)]
+              (sso/sync-group-memberships! (:user result) group-ids all-mapped-ids))
+            (catch Throwable e
+              (log/error e "Error syncing OIDC group memberships"))))))
+    result))
+
+
+;;; -------------------------------------------------- Group Sync Helpers --------------------------------------------------

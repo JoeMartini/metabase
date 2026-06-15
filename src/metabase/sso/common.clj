@@ -16,7 +16,7 @@
 (defn- sync-group-memberships*!
   [user-or-id to-remove to-add]
   (when (seq to-remove)
-    (log/debugf "Removing user %s from group(s) %s" (u/the-id user-or-id) to-remove)
+    (log/infof "REMOVE-GROUP: Removing user %s from group(s) %s" (u/the-id user-or-id) to-remove)
     (try
       (perms/remove-user-from-groups! user-or-id to-remove)
       (catch clojure.lang.ExceptionInfo e
@@ -31,7 +31,7 @@
   ;; When adding a user to a group we want to allow individual adds to fail with exceptions
   ;; that we will log
   (doseq [group-or-id to-add]
-    (log/debugf "Adding user %s to group %s" (u/the-id user-or-id) (u/the-id group-or-id))
+    (log/infof "ADD-GROUP: Adding user %s to group %s" (u/the-id user-or-id) (u/the-id group-or-id))
     (try
       (perms/add-user-to-group! user-or-id group-or-id)
       (catch Throwable e
@@ -50,7 +50,8 @@
                                                                          (excluded-group-ids)))]
      (sync-group-memberships*! user-or-id to-remove to-add)))
   ([user-or-id new-groups-or-ids mapped-groups-or-ids]
-   (let [mapped-group-ids   (set (map u/the-id mapped-groups-or-ids))
+   (let [_ (log/infof "SYNC-DEBUG: mapped-groups-or-ids=%s mapped-group-ids=%s" mapped-groups-or-ids (set (map u/the-id mapped-groups-or-ids)))
+                    mapped-group-ids   (set (map u/the-id mapped-groups-or-ids))
          current-group-ids  (when (seq mapped-group-ids)
                               (t2/select-fn-set :group_id :model/PermissionsGroupMembership
                                                 {:where
@@ -62,4 +63,5 @@
                                 (set/intersection mapped-group-ids)
                                 (set/difference (excluded-group-ids)))
          [to-remove to-add] (data/diff current-group-ids new-group-ids)]
+                    _ (log/infof "SYNC-DEBUG2: current=%s new=%s remove=%s add=%s" current-group-ids new-group-ids to-remove to-add)
      (sync-group-memberships*! user-or-id to-remove to-add))))

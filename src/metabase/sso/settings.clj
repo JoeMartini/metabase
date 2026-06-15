@@ -282,6 +282,28 @@
               (assert (#{:allow-all :allow-private :external-only} (keyword new-value))))
             (setting/set-value-of-type! :keyword :oidc-allowed-networks new-value)))
 
+(defsetting oidc-group-sync
+  (deferred-tru "Enable group membership synchronization with OIDC.")
+  :type    :boolean
+  :default false
+  :audit   :getter)
+
+(defsetting oidc-group-mappings
+  ;; Should be in the form: {"oidc-group-name": [1, 2, 3]} where keys are OIDC group names and values are lists of
+  ;; MB groups IDs
+  (deferred-tru "JSON containing OIDC to Metabase group mappings.")
+  :encryption :no
+  :type       :json
+  :cache?     false
+  :default    {}
+  :audit      :getter)
+
+(defsetting oidc-attribute-groups
+  (deferred-tru "Attribute to use for the user's groups from OIDC claims.")
+  :default    "groups"
+  :getter     (fn [] (u/lower-case-en (setting/get-value-of-type :string :oidc-attribute-groups)))
+  :encryption :no
+  :audit      :getter)
 
 ;;; -------------------------------------------------- OIDC Settings --------------------------------------------------
 
