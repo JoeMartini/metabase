@@ -316,14 +316,16 @@
    [:provider metabot-provider-schema]
    [:model {:optional true} [:maybe :string]]
    [:api-key {:optional true} [:maybe :string]]
-   [:credentials {:optional true} [:maybe bedrock-credentials-schema]]])
+   [:credentials {:optional true} [:maybe bedrock-credentials-schema]]
+   [:base-url {:optional true} [:maybe :string]]])
 
 (defn- provider-api-key-setting-key
   [provider]
   (case provider
     "anthropic"  :llm-anthropic-api-key
     "openai"     :llm-openai-api-key
-    "openrouter" :llm-openrouter-api-key))
+    "openrouter" :llm-openrouter-api-key
+    "custom"     :llm-custom-provider-api-key))
 
 (defn- non-blank-string
   [value]
@@ -566,6 +568,11 @@
                               throw-credentials-error!)]
     (when credentials
       (save-credentials! provider credentials))
+    (let [base-url (:base-url body)]
+      (when (and (= provider "custom") (contains? body :base-url))
+        (setting/set! :llm-custom-provider-base-url (non-blank-string base-url))))
+    (when (= provider "custom")
+      (setting/set! :llm-custom-provider-enabled? true))
     (when model
       (setting/set! :llm-metabot-provider (str provider "/" model)))
     (assoc response :value (metabot.settings/llm-metabot-provider))))

@@ -253,21 +253,16 @@
   counts as configured only when both the access key ID and secret access key are set."
   [provider]
   (case provider
-<<<<<<< HEAD
     "anthropic"  (configured-api-key-credentials (llm.settings/llm-anthropic-api-key))
     "bedrock"    (when (llm.settings/llm-bedrock-configured?)
                    {:access-key-id     (non-blank (llm.settings/llm-bedrock-access-key-id))
                     :secret-access-key (non-blank (llm.settings/llm-bedrock-secret-access-key))
                     :session-token     (non-blank (llm.settings/llm-bedrock-session-token))
                     :region            (non-blank (llm.settings/llm-bedrock-region))})
+    "custom"     (when (llm.settings/llm-custom-provider-enabled?)
+                   (configured-api-key-credentials (llm.settings/llm-custom-provider-api-key)))
     "openai"     (configured-api-key-credentials (llm.settings/llm-openai-api-key))
     "openrouter" (configured-api-key-credentials (llm.settings/llm-openrouter-api-key))
-=======
-    "anthropic"  (llm.settings/llm-anthropic-api-key)
-    "openai"     (llm.settings/llm-openai-api-key)
-    "openrouter" (llm.settings/llm-openrouter-api-key)
-    "custom"     (when (llm.settings/llm-custom-provider-enabled?) (llm.settings/llm-custom-provider-api-key))
->>>>>>> 3c1db627 (fix(metabot): add custom provider support to configured-provider-api-key)
     nil))
 
 (defn provider-credentials-complete?

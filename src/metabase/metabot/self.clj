@@ -33,6 +33,7 @@
     "bedrock"    bedrock/bedrock
     "openai"     openai/openai
     "openrouter" openrouter/openrouter
+    "custom"     openai/openai
     (throw (ex-info (str "Unknown LLM provider: " provider)
                     {:provider provider}))))
 
@@ -43,6 +44,7 @@
     "bedrock"    bedrock/list-models
     "openai"     openai/list-models
     "openrouter" openrouter/list-models
+    "custom"     openai/list-models
     (throw (ex-info (str "Unknown LLM provider: " provider)
                     {:provider provider}))))
 

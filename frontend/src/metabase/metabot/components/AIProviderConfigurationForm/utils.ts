@@ -58,6 +58,14 @@ export function getProviderOptions(
         addKeyUrl: "https://platform.openai.com/api-keys",
       },
     },
+    custom: {
+      value: "custom",
+      label: "Custom Provider (OpenAI-compatible)",
+      apiKey: {
+        placeholder: "sk-...",
+        addKeyUrl: "",
+      },
+    },
     openrouter: {
       value: "openrouter",
       label: "OpenRouter",
@@ -84,16 +92,20 @@ export function isAvailableProvider(provider: MetabotProvider): boolean {
   return (
     provider === "anthropic" ||
     provider === "bedrock" ||
-    provider === "metabase"
+    provider === "custom" ||
+    provider === "metabase" ||
+    provider === "openai" ||
+    provider === "openrouter"
   );
 }
 
 export const API_KEY_SETTING_BY_PROVIDER: Record<
   MetabotApiKeyProvider,
-  "llm-anthropic-api-key" | "llm-openai-api-key" | "llm-openrouter-api-key"
+  "llm-anthropic-api-key" | "llm-openai-api-key" | "llm-openrouter-api-key" | "llm-custom-provider-api-key"
 > = {
   anthropic: "llm-anthropic-api-key",
   openai: "llm-openai-api-key",
+  custom: "llm-custom-provider-api-key",
   openrouter: "llm-openrouter-api-key",
 };
 

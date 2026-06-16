@@ -191,7 +191,8 @@ export type MetabotProvider =
   | "anthropic"
   | "bedrock"
   | "openai"
-  | "openrouter";
+  | "openrouter"
+  | "custom";
 
 export interface BedrockCredentials {
   "access-key-id"?: string | null;
@@ -211,6 +212,7 @@ export interface MetabotSettingsResponse {
 }
 
 export interface UpdateMetabotSettingsRequest {
+  "base-url"?: string | null;
   provider: MetabotProvider;
   model?: string;
   "api-key"?: string | null;
