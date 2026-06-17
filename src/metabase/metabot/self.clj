@@ -13,10 +13,12 @@
    [metabase.analytics-interface.core :as analytics]
    [metabase.analytics.core :as analytics.core]
    [metabase.api.common :as api]
+   [metabase.llm.settings :as llm.settings]
    [metabase.metabot.provider-util :as provider-util]
    [metabase.metabot.self.bedrock :as bedrock]
    [metabase.metabot.self.claude :as claude]
    [metabase.metabot.self.core :as core]
+   [metabase.metabot.self.custom :as custom]
    [metabase.metabot.self.openai :as openai]
    [metabase.metabot.self.openrouter :as openrouter]
    [metabase.metabot.usage :as usage]
@@ -33,7 +35,7 @@
     "bedrock"    bedrock/bedrock
     "openai"     openai/openai
     "openrouter" openrouter/openrouter
-    "custom"     openai/openai
+    "custom"     custom/custom
     (throw (ex-info (str "Unknown LLM provider: " provider)
                     {:provider provider}))))
 
@@ -44,16 +46,28 @@
     "bedrock"    bedrock/list-models
     "openai"     openai/list-models
     "openrouter" openrouter/list-models
-    "custom"     openai/list-models
+    "custom"     custom/list-models
     (throw (ex-info (str "Unknown LLM provider: " provider)
                     {:provider provider}))))
 
 (defn- parse-provider-model [s]
-  (let [provider (provider-util/provider-and-model->provider s)]
+  (let [provider (provider-util/provider-and-model->provider s)
+        configured-model (when (= provider "custom")
+                           (llm.settings/llm-custom-provider-model))
+        raw-model (provider-util/provider-and-model->model s)
+        model (if (and (= provider "custom")
+                       (some? configured-model)
+                       (not (re-find #"/" raw-model)))
+                configured-model
+                raw-model)]
     {:provider   provider
      :stream-fn  (resolve-adapter provider)
-     :model      (provider-util/provider-and-model->model s)
-     :ai-proxy?  (provider-util/metabase-provider? s)}))
+     :model      model
+     :ai-proxy?  (provider-util/metabase-provider? s)
+     :api-key    (when (= provider "custom")
+                   (llm.settings/llm-custom-provider-api-key))
+     :base-url   (when (= provider "custom")
+                   (llm.settings/llm-custom-provider-base-url))}))
 
 (defn list-models
   "List available models for a provider using its configured credentials, or `:credentials` in `opts`.
@@ -293,14 +307,16 @@
      (reify clojure.lang.IReduceInit
        (reduce [_ rf init]
          (rf init {:type :error :error {:message limit-msg :error-code "ai_usage_limit_reached"}})))
-     (let [{:keys [provider stream-fn model ai-proxy?]} (parse-provider-model provider-and-model)]
+     (let [{:keys [provider stream-fn model ai-proxy? api-key base-url]} (parse-provider-model provider-and-model)]
        (log/info "Calling LLM" {:provider    provider :model model :parts (count parts) :tools (count tools)
                                 :tool-choice tool-choice :ai-proxy? ai-proxy?})
        (let [tracking-opts  (assoc tracking-opts :model provider-and-model :ai-proxy? ai-proxy?)
              streaming-opts (cond-> {:model model :input parts :tools (vals tools) :ai-proxy? ai-proxy?}
                               system-msg        (assoc :system system-msg)
                               (and (seq tools)
-                                   tool-choice) (assoc :tool_choice tool-choice))
+                                   tool-choice) (assoc :tool_choice tool-choice)
+                              api-key           (assoc :api-key api-key)
+                              base-url          (assoc :base-url base-url))
              make-source    (fn []
                               (eduction (comp (core/tool-executor-xf tools)
                                               (core/lite-aisdk-xf)
@@ -337,7 +353,7 @@
 
   Returns the parsed JSON map from the forced tool call."
   [provider-and-model messages json-schema temperature max-tokens tracking-opts]
-  (let [{:keys [provider stream-fn model ai-proxy?]} (parse-provider-model provider-and-model)
+  (let [{:keys [provider stream-fn model ai-proxy? api-key base-url]} (parse-provider-model provider-and-model)
         _ (log/info "Calling LLM (structured)" {:provider provider
                                                 :model model
                                                 :msg-count (count messages)
@@ -348,8 +364,10 @@
                         :schema      json-schema
                         :temperature temperature
                         :max-tokens  max-tokens
-                        :ai-proxy?   ai-proxy?}]
-    (with-span :info {:name      :metabot.agent/call-llm-structured
+                        :ai-proxy?   ai-proxy?
+                        :api-key     api-key
+                        :base-url    base-url}]
+    (with-span :info {:name      :metabase.agent/call-llm-structured
                       :model     model
                       :msg-count (count messages)}
       (with-retries

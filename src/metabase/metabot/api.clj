@@ -89,7 +89,7 @@
   to consolidate streaming chunks into single text parts.
 
   Monitors `canceled-chan` for client disconnection — when the client closes the
-  connection, the pipeline stops via `reduced` and collected parts are still persisted.
+  connection, the pipeline stops via `reduced` and the collected parts are still persisted.
 
   When `:debug?` is true, enables debug logging which emits a `debug_log` data
   part at the end of the stream with full LLM request/response data per iteration.
@@ -503,7 +503,7 @@
   resolves to a credentials map whose key material is nil: an explicit clear. Fields *inside* the Bedrock credentials
   map follow the same presence contract (see [[effective-bedrock-credentials]]). Throws a 400 when non-nil Bedrock
   credentials don't resolve to a complete set."
-  [provider {:keys [api-key credentials] :as body}]
+  [provider {:keys [api-key credentials base-url] :as body}]
   (if (= provider "bedrock")
     (when (contains? body :credentials)
       (if (nil? credentials)
@@ -520,7 +520,8 @@
                                                         [:access-key-id :secret-access-key]))})))
           creds)))
     (when (contains? body :api-key)
-      {:api-key (non-blank-string api-key)})))
+      {:api-key  (non-blank-string api-key)
+       :base-url (non-blank-string base-url)})))
 
 (defn- save-bedrock-credentials!
   "Persist a Bedrock credentials map resolved by [[request-credentials]]; nil key material clears those settings.
@@ -540,7 +541,10 @@
   (when credentials
     (if (= provider "bedrock")
       (save-bedrock-credentials! credentials)
-      (setting/set! (provider-api-key-setting-key provider) (:api-key credentials)))))
+      (do
+        (setting/set! (provider-api-key-setting-key provider) (:api-key credentials))
+        (when (and (= provider "custom") (contains? credentials :base-url))
+          (setting/set! :llm-custom-provider-base-url (:base-url credentials)))))))
 
 (api.macros/defendpoint :put "/settings"
   :- metabot-settings-response-schema
@@ -568,9 +572,6 @@
                               throw-credentials-error!)]
     (when credentials
       (save-credentials! provider credentials))
-    (let [base-url (:base-url body)]
-      (when (and (= provider "custom") (contains? body :base-url))
-        (setting/set! :llm-custom-provider-base-url (non-blank-string base-url))))
     (when (= provider "custom")
       (setting/set! :llm-custom-provider-enabled? true))
     (when model

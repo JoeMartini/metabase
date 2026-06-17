@@ -9,8 +9,9 @@ import {
 import {
   getErrorMessage,
   useAdminSetting,
-  useAdminSettings,
 } from "metabase/api/utils";
+// eslint-disable-next-line no-restricted-imports
+import { useAdminSettings } from "metabase/api/utils/settings";
 import { ConfirmModal } from "metabase/common/components/ConfirmModal";
 import { SetByEnvVar } from "metabase/common/components/SetByEnvVar";
 import { useSetting, useToast } from "metabase/common/hooks";
@@ -78,10 +79,6 @@ export function AIProviderConfigurationForm({
     "llm-openai-api-key",
     "llm-openrouter-api-key",
     "llm-custom-provider-api-key",
-  ] as const);
-
-  const { details: customProviderDetails } = useAdminSettings([
-    "llm-custom-provider-base-url",
   ] as const);
 
   const disconnectProvider = useCallback(async () => {
@@ -259,7 +256,7 @@ export function AIProviderConfigurationForm({
               isEnvSetting={isEnvSetting}
             />
           ))
-          .with("anthropic", "openai", "openrouter", (selectedProvider) => (
+          .with("anthropic", "openai", "openrouter", "custom", (selectedProvider) => (
             <ApiKeyProviderFields
               key={selectedProvider}
               selectedProvider={selectedProvider}
@@ -326,231 +323,3 @@ export function AIProviderConfigurationForm({
     </AIProviderConfigurationContext.Provider>
   );
 }
-
-const ProviderCredentialsFields = ({
-  selectedProvider,
-  connectedModel,
-  isCurrentConfigured,
-  isEnvSetting,
-}: {
-  selectedProvider: Exclude<MetabotProvider, "metabase">;
-  connectedModel: string | undefined;
-  isCurrentConfigured: boolean;
-  isEnvSetting: boolean;
-}) => {
-  const [model, setModel] = useState<string | undefined>(connectedModel);
-  const [apiKeyLocalValue, setApiKeyLocalValue] = useState<string | null>(null);
-  const [baseUrlLocalValue, setBaseUrlLocalValue] = useState<string | null>(null);
-  const [sendToast] = useToast();
-
-  useEffect(() => {
-    setModel(connectedModel);
-  }, [connectedModel]);
-
-  const [updateMetabotSettings, updateMetabotSettingsResult] =
-    useUpdateMetabotSettingsMutation();
-
-  const onConnect = async () => {
-    await updateMetabotSettings({
-      provider: selectedProvider,
-      "api-key": apiKeyLocalValue || null,
-      "base-url": baseUrlLocalValue || null,
-      model: model || null,
-    }).unwrap();
-
-    setApiKeyLocalValue(null);
-    setBaseUrlLocalValue(null);
-  };
-
-  const hasDirtyApiKey = apiKeyLocalValue !== null;
-  const connectHandler =
-    !isCurrentConfigured || hasDirtyApiKey ? onConnect : null;
-
-  const { isMutating } = useAIProviderConfigurationContext(connectHandler);
-
-  const { details: providerApiKeyDetails } = useAdminSettings([
-    "llm-anthropic-api-key",
-    "llm-openai-api-key",
-    "llm-openrouter-api-key",
-    "llm-custom-provider-api-key",
-  ] as const);
-
-  const { details: customProviderDetails } = useAdminSettings([
-    "llm-custom-provider-base-url",
-  ] as const);
-
-  const selectedApiKeySetting =
-    providerApiKeyDetails[API_KEY_SETTING_BY_PROVIDER[selectedProvider]];
-  const selectedApiKeyValue = String(selectedApiKeySetting?.value ?? "");
-
-  const selectedBaseUrlSetting = customProviderDetails["llm-custom-provider-base-url"];
-  const selectedBaseUrlValue = String(selectedBaseUrlSetting?.value ?? "");
-  const apiKeyEnvSettingName = selectedApiKeySetting?.is_env_setting
-    ? selectedApiKeySetting.env_name
-    : undefined;
-  const needsApiKey = !hasConfiguredSettingValue(selectedApiKeySetting);
-
-  const metabotSettingsQuery = useGetMetabotSettingsQuery(
-    {
-      provider: selectedProvider,
-    },
-    { skip: needsApiKey },
-  );
-
-  const modelOptions = useMemo(
-    () => getLlmModelOptions(metabotSettingsQuery.currentData?.models ?? []),
-    [metabotSettingsQuery.currentData?.models],
-  );
-
-  const modelError = getModelError(
-    metabotSettingsQuery.error,
-    selectedProvider,
-  );
-  const apiKeyError = hasDirtyApiKey
-    ? undefined
-    : (metabotSettingsQuery.currentData?.["api-key-error"] ?? undefined);
-
-  const displayApiKeyValue = apiKeyLocalValue ?? selectedApiKeyValue;
-
-  useEffect(() => {
-    setApiKeyLocalValue(null);
-    setBaseUrlLocalValue(null);
-  }, [selectedProvider, selectedApiKeySetting?.value]);
-
-  const handleApiKeyChange = (event: ChangeEvent<HTMLInputElement>) => {
-    setApiKeyLocalValue(event.target.value);
-  };
-
-  const handleBaseUrlChange = (event: ChangeEvent<HTMLInputElement>) => {
-    setBaseUrlLocalValue(event.target.value);
-  };
-
-  const handleModelChange = async (value: string) => {
-    setModel(value);
-
-    if (!value) {
-      return;
-    }
-
-    await updateMetabotSettings({
-      provider: selectedProvider,
-      model: value,
-    }).unwrap();
-
-    sendToast({
-      message: t`Settings saved successfully`,
-      icon: "check",
-    });
-  };
-
-  const selectedProviderDetails = getProviderOptions(true)[selectedProvider];
-
-  return (
-    <>
-      <TextInput
-        key={selectedProvider}
-        label={t`API key`}
-        type="password"
-        description={
-          <ExternalLink
-            key={selectedProviderDetails.value}
-            href={selectedProviderDetails.apiKey.addKeyUrl}
-          >
-            {c("{0} is the name of an AI provider")
-              .t`Get or manage keys in ${selectedProviderDetails.label}`}
-          </ExternalLink>
-        }
-        placeholder={
-          selectedProviderDetails.apiKey?.placeholder ?? t`Enter your API key`
-        }
-        value={displayApiKeyValue}
-        error={apiKeyError}
-        onChange={handleApiKeyChange}
-        disabled={isMutating || isEnvSetting || !!apiKeyEnvSettingName}
-        w="100%"
-      />
-
-      {apiKeyEnvSettingName ? (
-        <SetByEnvVar varName={apiKeyEnvSettingName} />
-      ) : null}
-
-      {selectedProvider === "custom" && (
-        <TextInput
-          label={t`Base URL`}
-          type="text"
-          placeholder="https://api.siliconflow.com/v1"
-          value={baseUrlLocalValue ?? selectedBaseUrlValue}
-          onChange={handleBaseUrlChange}
-          disabled={isMutating || isEnvSetting}
-          w="100%"
-        />
-      )}
-
-      {!needsApiKey && !apiKeyError && selectedProvider !== "custom" && (
-        <Select
-          label={t`Model`}
-          placeholder={
-            metabotSettingsQuery.isLoading
-              ? t`Loading models...`
-              : t`Select a model`
-          }
-          description={getModelDescription(selectedProvider)}
-          error={modelError}
-          data={modelOptions}
-          value={model}
-          onChange={handleModelChange}
-          disabled={isEnvSetting || needsApiKey || isMutating}
-          searchable
-          nothingFoundMessage={t`No models found`}
-        />
-      )}
-
-      {selectedProvider === "custom" && (
-        <TextInput
-          label={t`Model`}
-          type="text"
-          placeholder="deepseek-ai/DeepSeek-V3"
-          description={getModelDescription(selectedProvider)}
-          value={model ?? ""}
-          onChange={(e) => handleModelChange(e.target.value)}
-          disabled={isMutating || isEnvSetting}
-          w="100%"
-        />
-      )}
-
-      {updateMetabotSettingsResult.error && (
-        <Text size="sm" c="error">
-          {getErrorMessage(
-            updateMetabotSettingsResult.error,
-            t`Unable to save provider settings.`,
-          )}
-        </Text>
-      )}
-    </>
-  );
-};
-
-const getLlmModelOptions = (models: MetabotSettingsResponse["models"]) => {
-  const modelOptions = models.map((m) => ({
-    value: m.id,
-    label: m.display_name,
-    group: m.group,
-  }));
-
-  const sel = (o: MetabotModelOption) => _.pick(o, ["value", "label"]);
-  // group model options if needed
-  return _.every(modelOptions, (o) => !o.group)
-    ? modelOptions.map(sel)
-    : _.map(
-        _.groupBy(modelOptions, (o) => o.group ?? t`Other`),
-        (items, group) => ({ group, items: items.map(sel) }),
-      );
-};
-
-const hasConfiguredSettingValue = (setting: SettingDefinition | undefined) =>
-  Boolean(setting?.value || setting?.is_env_setting);
-
-const getModelError = (error: unknown, provider?: MetabotProvider) =>
-  !provider || !error
-    ? undefined
-    : getErrorMessage(error, t`Unable to load models.`);

@@ -2,7 +2,9 @@ import { type ChangeEvent, useEffect, useState } from "react";
 import { c, t } from "ttag";
 
 import { useUpdateMetabotSettingsMutation } from "metabase/api";
-import { getErrorMessage, useAdminSettings } from "metabase/api/utils";
+import { getErrorMessage } from "metabase/api/utils";
+// eslint-disable-next-line no-restricted-imports
+import { useAdminSettings } from "metabase/api/utils/settings";
 import { ExternalLink } from "metabase/common/components/ExternalLink";
 import { SetByEnvVar } from "metabase/common/components/SetByEnvVar";
 import { Text, TextInput } from "metabase/ui";
@@ -31,31 +33,54 @@ export const ApiKeyProviderFields = ({
   isEnvSetting: boolean;
 }) => {
   const [localApiKey, setLocalApiKey] = useState<string | null>(null);
+  const [localBaseUrl, setLocalBaseUrl] = useState<string | null>(null);
   const [updateMetabotSettings, updateMetabotSettingsResult] =
     useUpdateMetabotSettingsMutation();
 
-  const { details } = useAdminSettings([
-    "llm-anthropic-api-key",
-    "llm-openai-api-key",
-    "llm-openrouter-api-key",
-  ] as const);
+  const settingsToFetch =
+    selectedProvider === "custom"
+      ? ([
+          "llm-anthropic-api-key",
+          "llm-openai-api-key",
+          "llm-openrouter-api-key",
+          "llm-custom-provider-api-key",
+          "llm-custom-provider-base-url",
+        ] as const)
+      : ([
+          "llm-anthropic-api-key",
+          "llm-openai-api-key",
+          "llm-openrouter-api-key",
+        ] as const);
+
+  const { details } = useAdminSettings(settingsToFetch);
   const apiKeySetting = details[API_KEY_SETTING_BY_PROVIDER[selectedProvider]];
   const apiKeyEnvSettingName = apiKeySetting?.is_env_setting
     ? apiKeySetting.env_name
     : undefined;
 
+  const baseUrlSetting =
+    selectedProvider === "custom"
+      ? details["llm-custom-provider-base-url"]
+      : undefined;
+
   const onConnect = async () => {
     await updateMetabotSettings({
       provider: selectedProvider,
       "api-key": localApiKey || null,
+      "base-url": selectedProvider === "custom" ? localBaseUrl || null : null,
+      model: connectedModel || null,
     }).unwrap();
 
     setLocalApiKey(null);
+    setLocalBaseUrl(null);
   };
 
   const hasDirtyApiKey = localApiKey !== null;
+  const hasDirtyBaseUrl = localBaseUrl !== null;
   const connectHandler =
-    !isCurrentConfigured || hasDirtyApiKey ? onConnect : null;
+    !isCurrentConfigured || hasDirtyApiKey || hasDirtyBaseUrl
+      ? onConnect
+      : null;
   const { isMutating } = useAIProviderConfigurationContext(connectHandler);
 
   const needsApiKey = !hasConfiguredSettingValue(apiKeySetting);
@@ -64,13 +89,19 @@ export const ApiKeyProviderFields = ({
   const credentialsError = hasDirtyApiKey ? undefined : savedCredentialsError;
 
   const apiKeySettingValue = apiKeySetting?.value;
+  const baseUrlSettingValue = baseUrlSetting?.value;
 
   useEffect(() => {
     setLocalApiKey(null);
-  }, [apiKeySettingValue]);
+    setLocalBaseUrl(null);
+  }, [apiKeySettingValue, baseUrlSettingValue]);
 
   const handleApiKeyChange = (event: ChangeEvent<HTMLInputElement>) => {
     setLocalApiKey(event.target.value);
+  };
+
+  const handleBaseUrlChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setLocalBaseUrl(event.target.value);
   };
 
   const providerDetails = getProviderOptions(true)[selectedProvider];
@@ -81,10 +112,12 @@ export const ApiKeyProviderFields = ({
         label={t`API key`}
         type="password"
         description={
-          <ExternalLink href={providerDetails.apiKey.addKeyUrl}>
-            {c("{0} is the name of an AI provider")
-              .t`Get or manage keys in ${providerDetails.label}`}
-          </ExternalLink>
+          providerDetails.apiKey.addKeyUrl ? (
+            <ExternalLink href={providerDetails.apiKey.addKeyUrl}>
+              {c("{0} is the name of an AI provider")
+                .t`Get or manage keys in ${providerDetails.label}`}
+            </ExternalLink>
+          ) : null
         }
         placeholder={providerDetails.apiKey.placeholder}
         value={localApiKey ?? String(apiKeySettingValue ?? "")}
@@ -97,6 +130,18 @@ export const ApiKeyProviderFields = ({
       {apiKeyEnvSettingName ? (
         <SetByEnvVar varName={apiKeyEnvSettingName} />
       ) : null}
+
+      {selectedProvider === "custom" && (
+        <TextInput
+          label={t`Base URL`}
+          type="text"
+          placeholder="https://api.siliconflow.cn/v1"
+          value={localBaseUrl ?? String(baseUrlSettingValue ?? "")}
+          onChange={handleBaseUrlChange}
+          disabled={isMutating || isEnvSetting}
+          w="100%"
+        />
+      )}
 
       {!needsApiKey && !credentialsError && (
         <ProviderModelPicker

@@ -47,7 +47,9 @@
     :max-tokens  - Maximum tokens in the response
     :schema      - JSON Schema map for structured output; each provider forces a
                    tool call (Claude, OpenRouter) or uses json_schema mode (OpenAI)
-    :ai-proxy?   - When true, skip provider auth and use the Metabase AI proxy"
+    :ai-proxy?   - When true, skip provider auth and use the Metabase AI proxy
+    :api-key     - Override the configured API key (used by custom providers)
+    :base-url    - Override the configured base URL (used by custom providers)"
   [:map
    [:model       {:optional true} :string]
    [:system      {:optional true} [:maybe :string]]
@@ -57,7 +59,9 @@
    [:temperature {:optional true} [:maybe number?]]
    [:max-tokens  {:optional true} [:maybe :int]]
    [:schema      {:optional true} :any]
-   [:ai-proxy?   {:optional true} [:maybe :boolean]]])
+   [:ai-proxy?   {:optional true} [:maybe :boolean]]
+   [:api-key     {:optional true} [:maybe :string]]
+   [:base-url    {:optional true} [:maybe :string]]])
 
 (defn mkid
   "Generate a random id"

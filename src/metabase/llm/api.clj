@@ -33,8 +33,10 @@
   "Dispatch chat completion to the configured provider."
   [{:keys [provider] :as opts}]
   (case provider
-    "custom" (llm.custom/chat-completion opts)
-    (provider-chat-completion opts)))
+    ("custom" "openai") (llm.custom/chat-completion opts)
+    (throw (ex-info (tru "Unsupported LLM provider for SQL generation: {0}" provider)
+                    {:provider provider
+                     :status-code 400}))))
 
 (def ^:private sql-gen-throttlers
   "Throttlers for SQL generation endpoints.
