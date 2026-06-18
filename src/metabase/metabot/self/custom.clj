@@ -1,9 +1,28 @@
 (ns metabase.metabot.self.custom
   "Custom OpenAI-compatible provider adapter for Metabot streaming.
 
-  Uses the standard /v1/chat/completions endpoint (with tool_choice for
-  structured/tool calls) so it works with OpenAI-compatible providers such as
-  SiliconFlow that do not implement the newer /v1/responses API."
+  Unlike the official OpenAI/Anthropic adapters we intentionally do NOT pipe raw
+  provider chunks through the shared [[metabase.metabot.self.core/aisdk-xf]]
+  aggregator.  SiliconFlow-style OpenAI-compatible providers split tool-call
+  arguments across dozens of tiny chunks, omit `tool_call.id` on subsequent deltas,
+  and interleave non-empty `:usage` chunks between tool deltas.  Relying on the
+  generic aggregator means fighting those behaviours in upstream code.
+
+  This namespace therefore:
+
+  1. Builds a standard `/v1/chat/completions` request.
+  2. Streams the SSE response itself.
+  3. Accumulates text and tool-call arguments locally.
+  4. Emits AI SDK v5-style chunks ONLY when a logical unit is complete:
+     - `:text-start` + `:text-delta` chunks while streaming normal assistant text.
+       (Upstream aisdk-xf does not yet understand :text-end, so we deliberately omit it.)
+     - A single `:tool-input-start` (with complete arguments) followed by a
+       `:tool-input-available` when the model signals `finish_reason=tool_calls`.
+     - A single `:usage` chunk at the very end of the stream.
+
+  Because the output is already well-formed from the perspective of the generic
+  transducers, the shared `aisdk-xf`/`lite-aisdk-xf` stages can remain untouched,
+  which makes upstream rebases much safer."
   (:require
    [clojure.string :as str]
    [malli.json-schema :as mjs]
@@ -11,9 +30,14 @@
    [metabase.metabot.self.core :as core]
    [metabase.metabot.self.schema :as schema]
    [metabase.util.i18n :refer [tru]]
-   [metabase.util.json :as json]))
+   [metabase.util.json :as json]
+   [metabase.util.log :as log]))
 
 (set! *warn-on-reflection* true)
+
+(def ^:private ^String custom-provider-marker
+  "Verification marker logged when the custom provider adapter is chosen."
+  "METABOT_CUSTOM_PROVIDER_V2")
 
 (defn- tool->custom
   "Convert a tool definition map to OpenAI Chat Completions function format."
@@ -118,8 +142,6 @@
     (cond-> body
       all-tools    (assoc :tools all-tools
                           :tool_choice (cond
-                                         schema      {"type" "function"
-                                                      "function" {"name" "structured_output"}}
                                          tool_choice tool_choice
                                          :else       "auto"))
       temperature  (assoc :temperature temperature)
@@ -129,74 +151,112 @@
                                :json_schema {:name "structured_output"
                                              :schema schema}}))))
 
+;;; ---------------------------------------------------------------------------
+;;; Provider-agnostic streaming normalisation
+
+;; Chunk types we emit.  These are AI SDK v5 style *chunks* meant to be consumed
+;; by [[core/aisdk-xf]] / [[core/lite-aisdk-xf]] / [[core/tool-executor-xf]].
+
 (defn- chat-completions->aisdk-chunks-xf
-  "Transducer that turns OpenAI /v1/chat/completions SSE chunks into AISDK v5 parts."
+  "Transducer that turns a raw OpenAI-compatible `/v1/chat/completions` SSE stream
+  into AI SDK v5 chunks, hiding provider-specific fragmentation.
+
+  Important invariants:
+  - Tool-call argument fragments are accumulated locally.  We emit exactly one
+    `:tool-input-start` chunk (with complete arguments) followed by one
+    `:tool-input-available` chunk when `finish_reason` becomes `tool_calls`.
+  - We never emit `:tool-input-delta` chunks.  That is the chunk type that the
+    generic aggregator keys by `toolCallId`, and because providers omit the id on
+    subsequent fragments it breaks aggregation.
+  - Non-final `:usage` chunks are ignored; we emit a single `:usage` chunk at the
+    end of the stream.  This prevents a mid-stream usage chunk from flushing an
+    as-yet-incomplete tool or text group in the shared transducers."
   []
   (fn [rf]
-    (let [tool-id      (atom nil)
-          tool-name    (atom nil)
-          tool-args    (atom "")
-          text-id      (atom nil)
-          role         (atom nil)]
+    (let [text-id     (atom nil)
+          text-began? (atom false)
+          tool-id     (atom nil)
+          tool-name   (atom nil)
+          tool-args   (atom "")
+          last-usage  (atom nil)
+          last-role   (atom nil)]
       (fn
         ([result]
+         ;; Flush any collected tool call even if the finish_reason wasn't seen
+         ;; (defensive; normally finish_reason=tool_calls is emitted).
          (let [r1 (if-let [tid @tool-id]
                     (let [tname @tool-name
                           targs @tool-args]
                       (reset! tool-id nil)
                       (reset! tool-name nil)
                       (reset! tool-args "")
-                      (rf result {:type           :tool-input-start
-                                  :toolCallId     tid
-                                  :toolName       tname
-                                  :inputTextDelta targs}))
+                      (-> result
+                          (rf {:type           :tool-input-start
+                               :toolCallId     tid
+                               :toolName       tname
+                               :inputTextDelta targs})
+                          (rf {:type           :tool-input-available
+                               :toolCallId     tid
+                               :toolName       tname})))
                     result)
-               r2 (if-let [tid @text-id]
-                    (do (reset! text-id nil)
-                        (rf r1 {:type :text-end :id tid}))
+               r2 (if-let [usage @last-usage]
+                    (do (reset! last-usage nil)
+                        (rf r1 {:type  :usage
+                                :usage {:promptTokens     (or (:prompt_tokens usage) 0)
+                                        :completionTokens (or (:completion_tokens usage) 0)}}))
                     r1)]
            (rf r2)))
-        ([result chunk]
-         (let [choices  (:choices chunk)
-               choice   (first choices)
-               delta    (:delta choice)
-               finish   (:finish_reason choice)
-               id       (:id chunk)
-               usage    (:usage chunk)
-               new-role (or (:role delta) @role)
-               parts    (atom [])]
-           (reset! role new-role)
-           ;; text start for plain assistant responses
-           (when (and (= new-role "assistant") (nil? @text-id) (nil? @tool-id) (:content delta))
-             (reset! text-id id)
-             (swap! parts conj {:type :start :messageId id})
-             (swap! parts conj {:type :text-start :id id}))
 
-           ;; text content deltas
-           (when (and delta (:content delta))
+        ([result chunk]
+         (let [choices    (:choices chunk)
+               choice     (first choices)
+               delta      (:delta choice)
+               finish     (:finish_reason choice)
+               id         (:id chunk)
+               usage      (:usage chunk)
+               role       (or (:role delta) @last-role)
+               content    (:content delta)
+               tool-delta (:tool_calls delta)
+               parts-acc  (atom [])]
+           (when role
+             (reset! last-role role))
+
+           ;; ------------------------------------------------------------------
+           ;; plain assistant text
+           (when (and content (not (str/blank? content)))
              (when-not @text-id
                (reset! text-id id)
-               (swap! parts conj {:type :text-start :id id}))
-             (swap! parts conj {:type  :text-delta
-                                :id    @text-id
-                                :delta (:content delta)}))
+               (swap! parts-acc conj {:type :text-start :id id}))
+             (when-not @text-began?
+               (reset! text-began? true))
+             (swap! parts-acc conj {:type  :text-delta
+                                    :id    @text-id
+                                    :delta content}))
 
-           ;; tool_call deltas - accumulated and emitted as a single tool-input-start
-           (doseq [tc (:tool_calls delta)]
-             (let [tid (or (:id tc) @tool-id (core/mkid))]
+           ;; ------------------------------------------------------------------
+           ;; tool-call fragment accumulation (kept private to this transducer)
+           (doseq [tc tool-delta
+                   :let [idx (:index tc 0)
+                         ;; Some providers return a single-element vector; we only
+                         ;; support one tool call at a time for structured output.
+                         _ (when-not (zero? idx)
+                             (log/warn "Custom provider returned non-zero tool_call index"
+                                       {:index idx :chunk chunk}))]]
+             (let [tid   (or (:id tc) @tool-id (core/mkid))
+                   tname (get-in tc [:function :name])
+                   args  (get-in tc [:function :arguments])]
                (when-not @tool-id
                  (reset! tool-id tid))
-               (when (get-in tc [:function :name])
-                 (reset! tool-name (get-in tc [:function :name])))
-               (when-let [args (get-in tc [:function :arguments])]
+               (when (seq tname)
+                 (reset! tool-name tname))
+               (when (seq args)
                  (swap! tool-args str args))))
 
-           ;; finish reasons
+           ;; ------------------------------------------------------------------
+           ;; finish_reason handling
            (condp = finish
-             "stop"
-             (when-let [tid @text-id]
-               (reset! text-id nil)
-               (swap! parts conj {:type :text-end :id tid}))
+            "stop"
+            nil
 
              "tool_calls"
              (when-let [tid @tool-id]
@@ -205,25 +265,29 @@
                  (reset! tool-id nil)
                  (reset! tool-name nil)
                  (reset! tool-args "")
-                 (swap! parts conj {:type           :tool-input-start
-                                    :toolCallId     tid
-                                    :toolName       tname
-                                    :inputTextDelta targs})))
+                 (swap! parts-acc conj {:type           :tool-input-start
+                                        :toolCallId     tid
+                                        :toolName       tname
+                                        :inputTextDelta targs})
+                 (swap! parts-acc conj {:type           :tool-input-available
+                                        :toolCallId     tid
+                                        :toolName       tname})))
 
              nil)
 
-           ;; usage block at the end of the stream
+           ;; ------------------------------------------------------------------
+           ;; usage: stash only the latest, emit at completion.  We deliberately
+           ;; ignore incremental usage chunks because they cause the upstream
+           ;; aggregator to flush mid-stream.
            (when usage
-             (swap! parts conj {:type  :usage
-                                :usage {:promptTokens     (:prompt_tokens usage 0)
-                                        :completionTokens (:completion_tokens usage 0)
-                                        :model            (:model chunk)}}))
+             (reset! last-usage usage))
 
-           (reduce rf result @parts)))))))
+           (reduce rf result @parts-acc)))))))
 
 (defn custom-raw
   "Perform a streaming request to a custom OpenAI-compatible /v1/chat/completions endpoint."
   ([opts]
+   (log/info custom-provider-marker "Custom provider streaming request starting")
    (let [model (or (:model opts) "deepseek-ai/DeepSeek-V3")
          req   (chat-completions-request-body opts)]
      (try
