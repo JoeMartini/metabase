@@ -6,6 +6,7 @@ import { usePageTitle } from "metabase/hooks/use-page-title";
 import type { AuthProvider } from "metabase/plugins/types";
 import { useSelector } from "metabase/redux";
 import { getApplicationName } from "metabase/selectors/whitelabel";
+import { getSetting } from "metabase/selectors/settings";
 import { Box, Divider } from "metabase/ui";
 
 import { getAuthProviders } from "../../selectors";
@@ -29,6 +30,8 @@ export const Login = ({ params, location }: LoginProps): JSX.Element => {
   const selection = getSelectedProvider(providers, params?.provider);
   const redirectUrl = location?.query?.redirect;
   const applicationName = useSelector(getApplicationName);
+  const authMode = useSelector((state) => getSetting(state, "oidc-auth-mode"));
+  const isOidcFull = authMode === "oidc_full";
 
   usePageTitle(t`Login`);
 
@@ -36,7 +39,35 @@ export const Login = ({ params, location }: LoginProps): JSX.Element => {
     providers,
     (provider) => provider.name === "password",
   );
-  return (
+
+  return isOidcFull ? (
+    <AuthLayout>
+      <Box
+        role="heading"
+        c="text-primary"
+        fz="1.5rem"
+        fw="bold"
+        lh="2rem"
+        ta="center"
+      >
+        {applicationName}
+      </Box>
+      {selection && selection.Panel && (
+        <Box mt="2.5rem">
+          <selection.Panel redirectUrl={redirectUrl} />
+        </Box>
+      )}
+      {!selection && (
+        <Box mt="3.5rem">
+          {otherProviders.map((provider) => (
+            <Box key={provider.name} mt="2rem" ta="center">
+              <provider.Button isCard={true} redirectUrl={redirectUrl} />
+            </Box>
+          ))}
+        </Box>
+      )}
+    </AuthLayout>
+  ) : (
     <AuthLayout>
       <Box
         role="heading"

@@ -506,6 +506,7 @@ interface AdminSettings {
   "google-auth-configured": boolean;
   "premium-embedding-token": string | null;
   "oidc-login-providers"?: OidcAuthProvider[];
+  "oidc-auth-mode"?: "oidc" | "oidc_full";
   "other-sso-enabled?"?: boolean; // yes the question mark is in the variable name
   "show-database-syncing-modal": boolean;
   "token-status": TokenStatus | null;

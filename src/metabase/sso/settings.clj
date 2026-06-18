@@ -334,6 +334,19 @@
   :default    false
   :audit      :getter)
 
+(defsetting oidc-auth-mode
+  (deferred-tru "OIDC authentication mode. `oidc` keeps local password login available as fallback; `oidc_full` hides local login and presents a branded SSO-only page.")
+  :type       :string
+  :visibility :public
+  :encryption :no
+  :default    "oidc"
+  :setter     (fn [new-value]
+                (when (and (some? new-value)
+                           (not (#{"oidc" "oidc_full"} new-value)))
+                  (throw (ex-info "Invalid OIDC auth mode. Allowed values: oidc, oidc_full"
+                                  {:status-code 400})))
+                (setting/set-value-of-type! :string :oidc-auth-mode new-value)))
+
 (defsetting oidc-login-providers
   (deferred-tru "Public list of enabled OIDC providers for the login page.")
   :type       :json
