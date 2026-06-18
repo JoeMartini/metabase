@@ -12,6 +12,7 @@
    [metabase.config.core :as config]
    [metabase.lib-be.core :as lib-be]
    [metabase.lib.core :as lib]
+   [metabase.llm.settings :as llm.settings]
    [metabase.metabot.agent.core :as agent]
    [metabase.metabot.api.conversations]
    [metabase.metabot.api.document]
@@ -304,19 +305,25 @@
    [:credentials-error {:optional true} [:maybe :string]]
    [:models [:sequential llm-model-response-schema]]])
 
-(def ^:private bedrock-credentials-schema
+(def ^:private provider-credentials-schema
+  "Provider credentials carried by the request body's `:credentials` map.
+  Bedrock sends AWS key material; Azure sends an API key and base URL."
   [:map
    [:access-key-id     {:optional true} [:maybe :string]]
    [:secret-access-key {:optional true} [:maybe :string]]
    [:region            {:optional true} [:maybe :string]]
-   [:session-token     {:optional true} [:maybe :string]]])
+   [:session-token     {:optional true} [:maybe :string]]
+   [:api-key           {:optional true} [:maybe :string]]
+   [:base-url          {:optional true} [:maybe :string]]])
 
 (def ^:private metabot-settings-request-schema
   [:map
    [:provider metabot-provider-schema]
    [:model {:optional true} [:maybe :string]]
    [:api-key {:optional true} [:maybe :string]]
-   [:credentials {:optional true} [:maybe bedrock-credentials-schema]]
+   [:credentials {:optional true} [:maybe provider-credentials-schema]]
+   ;; Frontend's custom-provider form sends base-url as a top-level field;
+   ;; Azure uses base-url inside the :credentials map instead.
    [:base-url {:optional true} [:maybe :string]]])
 
 (defn- provider-api-key-setting-key
@@ -340,16 +347,18 @@
     (or (non-blank-string model)
         (metabot.settings/default-model-for-provider provider))))
 
-(def ^:private invalid-api-key-statuses
-  #{401 403})
-
-(defn- invalid-credentials-error?
-  "Whether a provider api-error means the credentials were rejected (or missing)."
+(defn- provider-client-error?
+  "Whether a provider api-error is a client-side 4xx we should surface rather than treat as an
+  outage. Covers rejected or missing credentials (401/403) and a request the provider refused
+  outright (e.g. a custom base URL pointing at the wrong surface, which 400s). `rethrow-api-error!`
+  tags these with `:status`; other callers throw with `:status-code`. Provider 5xx and network
+  failures are left to propagate as 500s so outages aren't reported as client errors."
   [error]
-  (let [status (or (:status (ex-data error))
-                   (:status-code (ex-data error)))]
-    (and (:api-error (ex-data error))
-         (contains? invalid-api-key-statuses status))))
+  (let [{:keys [api-error status status-code]} (ex-data error)
+        status (or status status-code)]
+    (and api-error
+         (number? status)
+         (<= 400 status 499))))
 
 (defn- title-case-token
   [token]
@@ -421,11 +430,12 @@
 
 (defn- provider-models-response
   "List a provider's models.
-  Validate against `credentials-override` when provided and the provider's saved credentials otherwise. The shape of
-  the credentials map varies by provider. See [[metabot.settings/configured-provider-credentials]]."
+  Validate against `:credentials` in `opts` when provided and the provider's saved credentials otherwise. The shape
+  of the credentials map varies by provider (see [[metabot.settings/configured-provider-credentials]]). `:model` in
+  `opts` is the candidate model for providers whose validation depends on it (Azure's wire family)."
   ([provider]
    (provider-models-response provider nil))
-  ([provider credentials-override]
+  ([provider {credentials-override :credentials model :model}]
    (if (= provider provider-util/metabase-provider-prefix)
      {:models (decorate-provider-models
                provider
@@ -436,9 +446,10 @@
          (try
            {:models (decorate-provider-models
                      provider
-                     (:models (metabot.self/list-models provider {:credentials credentials})))}
+                     (:models (metabot.self/list-models provider (cond-> {:credentials credentials}
+                                                                   model (assoc :model model)))))}
            (catch clojure.lang.ExceptionInfo e
-             (if (invalid-credentials-error? e)
+             (if (provider-client-error? e)
                {:models []
                 :credentials-error (.getMessage e)}
                (throw e))))
@@ -447,10 +458,10 @@
 (defn- settings-response
   ([provider]
    (settings-response provider nil))
-  ([provider credentials-override]
+  ([provider opts]
    (merge
     {:value (metabot.settings/llm-metabot-provider)}
-    (provider-models-response provider credentials-override))))
+    (provider-models-response provider opts))))
 
 (defn- current-provider
   []
@@ -494,17 +505,35 @@
           (metabot.settings/configured-provider-credentials "bedrock")
           bedrock-credential-fields))
 
+(defn- effective-azure-credentials
+  "The Azure credentials a settings request resolves to.
+
+  Non-blank request fields are layered over the saved `llm-azure-*` settings, so e.g. a key-only rotation keeps the
+  saved base URL. The settings are read individually (not via the all-or-nothing configured-credentials map) so a
+  partially-configured or env-set field still participates in layering — completeness is the caller's check. The
+  base URL is normalized the same way its setter normalizes it (whitespace/trailing-slash trim) so the validation
+  round-trip exercises exactly what would be persisted."
+  [{:keys [api-key base-url]}]
+  {:api-key  (or (non-blank-string api-key)
+                 (non-blank-string (llm.settings/llm-azure-api-key)))
+   :base-url (or (llm.settings/normalize-llm-base-url base-url)
+                 (llm.settings/normalize-llm-base-url (llm.settings/llm-azure-api-base-url)))})
+
 (defn- request-credentials
   "The credentials override carried by a `PUT /api/metabot/settings` request body as a provider credentials map.
 
   nil when the request does not touch credentials for `provider`.
 
-  An explicitly nil credential field in the body — `:api-key` for API-key providers, `:credentials` for Bedrock —
-  resolves to a credentials map whose key material is nil: an explicit clear. Fields *inside* the Bedrock credentials
-  map follow the same presence contract (see [[effective-bedrock-credentials]]). Throws a 400 when non-nil Bedrock
-  credentials don't resolve to a complete set."
+  An explicitly nil credential field in the body — `:api-key` for API-key providers, `:credentials` for Bedrock and
+  Azure — resolves to a credentials map whose key material is nil: an explicit clear. Fields *inside* the Bedrock
+  credentials map follow that map's presence contract (see [[effective-bedrock-credentials]]); blank fields *inside*
+  the Azure credentials map mean \"keep the saved value\" (see [[effective-azure-credentials]]), so e.g. a key-only
+  rotation can't wipe the base URL. For the custom OpenAI-compatible provider, the API key and base URL are sent as
+  top-level fields and returned together. Throws a 400 when non-nil Bedrock/Azure credentials don't resolve to a
+  complete set."
   [provider {:keys [api-key credentials base-url] :as body}]
-  (if (= provider "bedrock")
+  (case provider
+    "bedrock"
     (when (contains? body :credentials)
       (if (nil? credentials)
         {:access-key-id     nil
@@ -519,9 +548,27 @@
                              :missing-keys (vec (remove #(non-blank-string (get creds %))
                                                         [:access-key-id :secret-access-key]))})))
           creds)))
+
+    "azure"
+    (when (contains? body :credentials)
+      (if (nil? credentials)
+        {:api-key  nil
+         :base-url nil}
+        (let [creds (effective-azure-credentials credentials)]
+          (when-not (metabot.settings/provider-credentials-complete? provider creds)
+            (throw (ex-info (tru "Azure credentials are incomplete.")
+                            {:status-code  400
+                             :api-error    true
+                             :missing-keys (vec (remove #(non-blank-string (get creds %))
+                                                        [:api-key :base-url]))})))
+          creds)))
+
     (when (contains? body :api-key)
-      {:api-key  (non-blank-string api-key)
-       :base-url (non-blank-string base-url)})))
+      (let [api-key (non-blank-string api-key)]
+        (if (= provider "custom")
+          {:api-key  api-key
+           :base-url (non-blank-string base-url)}
+          {:api-key api-key})))))
 
 (defn- save-bedrock-credentials!
   "Persist a Bedrock credentials map resolved by [[request-credentials]]; nil key material clears those settings.
@@ -535,16 +582,49 @@
   (when (contains? credentials :region)
     (setting/set! :llm-bedrock-region (:region credentials))))
 
+(defn- check-not-env-shadowed!
+  "Throw a 400 when `setting-key` is controlled by an env var. Writes to env-shadowed settings
+  persist to the app DB but the env var wins on every read, so they silently do nothing — reject
+  them up front instead."
+  [setting-key]
+  (when (some? (setting/env-var-value setting-key))
+    (throw (ex-info (tru "This setting is set by the {0} environment variable and cannot be changed via the API."
+                         (setting/env-var-name setting-key))
+                    {:status-code 400
+                     :setting     setting-key}))))
+
+(defn- save-azure-credentials!
+  "Persist an Azure credentials map resolved by [[request-credentials]]; nil values clear those settings."
+  [{:keys [api-key base-url]}]
+  (setting/set! :llm-azure-api-key api-key)
+  (setting/set! :llm-azure-api-base-url base-url))
+
 (defn- save-credentials!
   "Persist the credentials override resolved by [[request-credentials]]; nil leaves the saved settings untouched."
   [provider credentials]
   (when credentials
-    (if (= provider "bedrock")
-      (save-bedrock-credentials! credentials)
-      (do
-        (setting/set! (provider-api-key-setting-key provider) (:api-key credentials))
-        (when (and (= provider "custom") (contains? credentials :base-url))
-          (setting/set! :llm-custom-provider-base-url (:base-url credentials)))))))
+    (case provider
+      "bedrock" (save-bedrock-credentials! credentials)
+      "azure"   (save-azure-credentials! credentials)
+      "custom"  (do
+                  (setting/set! (provider-api-key-setting-key provider) (:api-key credentials))
+                  (when (contains? credentials :base-url)
+                    (setting/set! :llm-custom-provider-base-url (:base-url credentials))))
+      (setting/set! (provider-api-key-setting-key provider) (:api-key credentials)))))
+
+(defn- credential-setting-keys
+  "The app-DB settings that persisting `provider`'s resolved `credentials` map would write
+  (mirrors [[save-credentials!]]). Used to reject writes to env-shadowed settings up front: a write
+  to an env-shadowed setting persists a DB row the env var then silently wins over. Bedrock writes
+  `:llm-bedrock-region` only when the credentials carry it (see [[save-bedrock-credentials!]]), so it
+  is guarded only then; the other fields are always written."
+  [provider credentials]
+  (case provider
+    "bedrock" (cond-> [:llm-bedrock-access-key-id :llm-bedrock-secret-access-key :llm-bedrock-session-token]
+                (contains? credentials :region) (conj :llm-bedrock-region))
+    "azure"   [:llm-azure-api-key :llm-azure-api-base-url]
+    "custom"  [(provider-api-key-setting-key provider) :llm-custom-provider-base-url]
+    [(provider-api-key-setting-key provider)]))
 
 (api.macros/defendpoint :put "/settings"
   :- metabot-settings-response-schema
@@ -567,8 +647,33 @@
 
                             :else
                             nil)
+        ;; Azure has no default model: the FE composes `{family}/{deployment}` from required
+        ;; inputs, so a connect (provider switch) without one is a malformed request, and a
+        ;; supplied model must parse before the validation round-trip relies on its wire family.
+        _                 (when (= provider "azure")
+                            (when (and provider-changed? (nil? model))
+                              (throw (ex-info (tru "A model provider and deployment name are required to connect Azure.")
+                                              {:status-code 400
+                                               :api-error   true
+                                               :provider    provider})))
+                            (when model
+                              (metabot.settings/validate-azure-model! (str provider "/" model) model)))
+        ;; Reject writes to env-shadowed settings before verifying or persisting anything: guard every
+        ;; credential setting a save would touch (see [[credential-setting-keys]]), plus the
+        ;; provider/model setting whenever a provider/model write would happen.
+        _                 (when credentials
+                            (run! check-not-env-shadowed! (credential-setting-keys provider credentials)))
+        _                 (when model
+                            (check-not-env-shadowed! :llm-metabot-provider))
+        ;; Azure connect validation needs the candidate model's wire family; credential-only
+        ;; rotations on a connected Azure provider fall back to the saved model.
+        validation-model  (when (= provider "azure")
+                            (or model
+                                (when-not provider-changed?
+                                  (provider-util/provider-and-model->model (metabot.settings/llm-metabot-provider)))))
         ;; The model listing validates the request credentials before anything is saved.
-        response          (-> (settings-response provider credentials)
+        response          (-> (settings-response provider {:credentials credentials
+                                                           :model       validation-model})
                               throw-credentials-error!)]
     (when credentials
       (save-credentials! provider credentials))

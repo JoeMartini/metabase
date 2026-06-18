@@ -21,6 +21,7 @@ import type { MetabotProvider } from "metabase-types/api";
 
 import { AIProviderConfigurationContext } from "./AIProviderConfigurationContext";
 import { ApiKeyProviderFields } from "./ApiKeyProviderFields";
+import { AzureProviderFields } from "./AzureProviderFields";
 import { BedrockProviderFields } from "./BedrockProviderFields";
 import {
   API_KEY_SETTING_BY_PROVIDER,
@@ -96,7 +97,11 @@ export function AIProviderConfigurationForm({
       "llm-metabot-provider": null,
     };
 
-    if (connectedProvider !== "metabase" && connectedProvider !== "bedrock") {
+    if (
+      connectedProvider !== "metabase" &&
+      connectedProvider !== "bedrock" &&
+      connectedProvider !== "azure"
+    ) {
       const apiKeySettingKey = API_KEY_SETTING_BY_PROVIDER[connectedProvider];
       const apiKeySetting = providerApiKeyDetails[apiKeySettingKey];
 
@@ -106,12 +111,12 @@ export function AIProviderConfigurationForm({
     }
 
     try {
-      if (connectedProvider === "bedrock") {
-        // Bedrock key material spans several settings; an explicit `credentials: null`
-        // clears them all in one call. It runs before the provider is deselected so a
-        // failure can't leave saved keys behind.
+      if (connectedProvider === "bedrock" || connectedProvider === "azure") {
+        // Bedrock and Azure key material spans several settings; an explicit
+        // `credentials: null` clears them all in one call. It runs before the provider
+        // is deselected so a failure can't leave saved keys behind.
         await updateMetabotSettings({
-          provider: "bedrock",
+          provider: connectedProvider,
           credentials: null,
         }).unwrap();
       }
@@ -248,6 +253,13 @@ export function AIProviderConfigurationForm({
         {match(provider)
           .with("metabase", () => (
             <MetabaseAIProviderSetup onConnect={onClose} />
+          ))
+          .with("azure", () => (
+            <AzureProviderFields
+              connectedModel={connectedModel}
+              isCurrentConfigured={isCurrentConfigured}
+              isEnvSetting={isEnvSetting}
+            />
           ))
           .with("bedrock", () => (
             <BedrockProviderFields

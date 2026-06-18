@@ -15,6 +15,7 @@
    [metabase.api.common :as api]
    [metabase.llm.settings :as llm.settings]
    [metabase.metabot.provider-util :as provider-util]
+   [metabase.metabot.self.azure :as azure]
    [metabase.metabot.self.bedrock :as bedrock]
    [metabase.metabot.self.claude :as claude]
    [metabase.metabot.self.core :as core]
@@ -32,6 +33,7 @@
   ;; a `case` inside of function instead of a map so that with-redefs work well
   (case provider
     "anthropic"  claude/claude
+    "azure"      azure/azure
     "bedrock"    bedrock/bedrock
     "openai"     openai/openai
     "openrouter" openrouter/openrouter
@@ -43,6 +45,7 @@
   ;; a `case` inside of function instead of a map so that with-redefs work well
   (case provider
     "anthropic"  claude/list-models
+    "azure"      azure/list-models
     "bedrock"    bedrock/list-models
     "openai"     openai/list-models
     "openrouter" openrouter/list-models
