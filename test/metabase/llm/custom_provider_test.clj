@@ -15,12 +15,12 @@
     (mt/with-temporary-setting-values
       [llm-custom-provider-enabled? true
        llm-custom-provider-name "SiliconFlow"
-       llm-custom-provider-base-url "https://api.siliconflow.com/v1"
+       llm-custom-provider-base-url "https://api.siliconflow.cn/v1"
        llm-custom-provider-api-key "sk-test-siliconflow"
        llm-custom-provider-model "deepseek-ai/DeepSeek-V3"]
       (is (true? (llm.settings/llm-custom-provider-enabled?)))
       (is (= "SiliconFlow" (llm.settings/llm-custom-provider-name)))
-      (is (= "https://api.siliconflow.com/v1" (llm.settings/llm-custom-provider-base-url)))
+      (is (= "https://api.siliconflow.cn/v1" (llm.settings/llm-custom-provider-base-url)))
       (is (= "sk-test-siliconflow" (llm.settings/llm-custom-provider-api-key)))
       (is (= "deepseek-ai/DeepSeek-V3" (llm.settings/llm-custom-provider-model)))))
 
@@ -33,7 +33,7 @@
        llm-custom-provider-model nil]
       (is (false? (llm.settings/llm-custom-provider-enabled?)))
       (is (= "Custom Provider" (llm.settings/llm-custom-provider-name)))
-      (is (= "https://api.siliconflow.com/v1" (llm.settings/llm-custom-provider-base-url)))
+      (is (= "https://api.siliconflow.cn/v1" (llm.settings/llm-custom-provider-base-url)))
       (is (nil? (llm.settings/llm-custom-provider-api-key)))
       (is (= "deepseek-ai/DeepSeek-V3" (llm.settings/llm-custom-provider-model))))))
 
