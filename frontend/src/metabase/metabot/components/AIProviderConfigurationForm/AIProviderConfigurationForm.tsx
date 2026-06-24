@@ -9,8 +9,9 @@ import {
 import {
   getErrorMessage,
   useAdminSetting,
-  useAdminSettings,
 } from "metabase/api/utils";
+// eslint-disable-next-line no-restricted-imports
+import { useAdminSettings } from "metabase/api/utils/settings";
 import { ConfirmModal } from "metabase/common/components/ConfirmModal";
 import { SetByEnvVar } from "metabase/common/components/SetByEnvVar";
 import { useSetting, useToast } from "metabase/common/hooks";
@@ -78,6 +79,7 @@ export function AIProviderConfigurationForm({
     "llm-anthropic-api-key",
     "llm-openai-api-key",
     "llm-openrouter-api-key",
+    "llm-custom-provider-api-key",
   ] as const);
 
   const disconnectProvider = useCallback(async () => {
@@ -266,7 +268,7 @@ export function AIProviderConfigurationForm({
               isEnvSetting={isEnvSetting}
             />
           ))
-          .with("anthropic", "openai", "openrouter", (selectedProvider) => (
+          .with("anthropic", "openai", "openrouter", "custom", (selectedProvider) => (
             <ApiKeyProviderFields
               key={selectedProvider}
               selectedProvider={selectedProvider}

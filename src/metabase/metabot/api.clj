@@ -90,7 +90,7 @@
   to consolidate streaming chunks into single text parts.
 
   Monitors `canceled-chan` for client disconnection — when the client closes the
-  connection, the pipeline stops via `reduced` and collected parts are still persisted.
+  connection, the pipeline stops via `reduced` and the collected parts are still persisted.
 
   When `:debug?` is true, enables debug logging which emits a `debug_log` data
   part at the end of the stream with full LLM request/response data per iteration.
@@ -333,14 +333,18 @@
    [:provider metabot-provider-schema]
    [:model {:optional true} [:maybe :string]]
    [:api-key {:optional true} [:maybe :string]]
-   [:credentials {:optional true} [:maybe provider-credentials-schema]]])
+   [:credentials {:optional true} [:maybe provider-credentials-schema]]
+   ;; Frontend's custom-provider form sends base-url as a top-level field;
+   ;; Azure uses base-url inside the :credentials map instead.
+   [:base-url {:optional true} [:maybe :string]]])
 
 (defn- provider-api-key-setting-key
   [provider]
   (case provider
     "anthropic"  :llm-anthropic-api-key
     "openai"     :llm-openai-api-key
-    "openrouter" :llm-openrouter-api-key))
+    "openrouter" :llm-openrouter-api-key
+    "custom"     :llm-custom-provider-api-key))
 
 (defn- non-blank-string
   [value]
@@ -536,9 +540,10 @@
   Azure — resolves to a credentials map whose key material is nil: an explicit clear. Fields *inside* the Bedrock
   credentials map follow that map's presence contract (see [[effective-bedrock-credentials]]); blank fields *inside*
   the Azure credentials map mean \"keep the saved value\" (see [[effective-azure-credentials]]), so e.g. a key-only
-  rotation can't wipe the base URL. Throws a 400 when non-nil Bedrock/Azure credentials don't resolve to a complete
-  set."
-  [provider {:keys [api-key credentials] :as body}]
+  rotation can't wipe the base URL. For the custom OpenAI-compatible provider, the API key and base URL are sent as
+  top-level fields and returned together. Throws a 400 when non-nil Bedrock/Azure credentials don't resolve to a
+  complete set."
+  [provider {:keys [api-key credentials base-url] :as body}]
   (case provider
     "bedrock"
     (when (contains? body :credentials)
@@ -571,7 +576,11 @@
           creds)))
 
     (when (contains? body :api-key)
-      {:api-key (non-blank-string api-key)})))
+      (let [api-key (non-blank-string api-key)]
+        (if (= provider "custom")
+          {:api-key  api-key
+           :base-url (non-blank-string base-url)}
+          {:api-key api-key})))))
 
 (defn- save-bedrock-credentials!
   "Persist a Bedrock credentials map resolved by [[request-credentials]]; nil key material clears those settings.
@@ -609,6 +618,10 @@
     (case provider
       "bedrock" (save-bedrock-credentials! credentials)
       "azure"   (save-azure-credentials! credentials)
+      "custom"  (do
+                  (setting/set! (provider-api-key-setting-key provider) (:api-key credentials))
+                  (when (contains? credentials :base-url)
+                    (setting/set! :llm-custom-provider-base-url (:base-url credentials))))
       (setting/set! (provider-api-key-setting-key provider) (:api-key credentials)))))
 
 (defn- credential-setting-keys
@@ -622,6 +635,7 @@
     "bedrock" (cond-> [:llm-bedrock-access-key-id :llm-bedrock-secret-access-key :llm-bedrock-session-token]
                 (contains? credentials :region) (conj :llm-bedrock-region))
     "azure"   [:llm-azure-api-key :llm-azure-api-base-url]
+    "custom"  [(provider-api-key-setting-key provider) :llm-custom-provider-base-url]
     [(provider-api-key-setting-key provider)]))
 
 (api.macros/defendpoint :put "/settings"
@@ -675,6 +689,8 @@
                               throw-credentials-error!)]
     (when credentials
       (save-credentials! provider credentials))
+    (when (= provider "custom")
+      (setting/set! :llm-custom-provider-enabled? true))
     (when model
       (setting/set! :llm-metabot-provider (str provider "/" model)))
     (assoc response :value (metabot.settings/llm-metabot-provider))))

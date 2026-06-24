@@ -294,3 +294,44 @@
   :visibility :settings-manager
   :export? false
   :doc false)
+
+;;; -------------------------------------------------- Custom Provider --------------------------------------------------
+
+(defsetting llm-custom-provider-enabled?
+  (deferred-tru "Whether custom LLM provider is enabled.")
+  :type       :boolean
+  :visibility :settings-manager
+  :default    false
+  :export?    false
+  :doc        false)
+
+(defsetting llm-custom-provider-name
+  (deferred-tru "Display name for the custom LLM provider.")
+  :encryption :no
+  :visibility :settings-manager
+  :default    "Custom Provider"
+  :export?    false
+  :doc        false)
+
+(defsetting llm-custom-provider-base-url
+  (deferred-tru "Base URL for the custom LLM provider (OpenAI-compatible API).")
+  :encryption :no
+  :visibility :settings-manager
+  :default    nil
+  :export?    false
+  :doc        false)
+
+(defsetting llm-custom-provider-api-key
+  (deferred-tru "API key for the custom LLM provider.")
+  :sensitive? true
+  :visibility :settings-manager
+  :export?    false
+  :doc        false)
+
+(defsetting llm-custom-provider-model
+  (deferred-tru "Default model for the custom LLM provider.")
+  :encryption :no
+  :visibility :settings-manager
+  :default    nil
+  :export?    false
+  :doc        false)

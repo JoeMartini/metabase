@@ -104,7 +104,7 @@
 
 (def ^:private direct-providers
   "Providers that can be used directly (not via the metabase/ proxy prefix)."
-  #{"anthropic" "azure" "bedrock" "openai" "openrouter"})
+  #{"anthropic" "azure" "bedrock" "custom" "openai" "openrouter"})
 
 (def ^:private default-anthropic-llm-metabot-model
   "Default Anthropic model used for Metabot when no explicit model is selected."
@@ -286,6 +286,11 @@
                     :secret-access-key (non-blank (llm.settings/llm-bedrock-secret-access-key))
                     :session-token     (non-blank (llm.settings/llm-bedrock-session-token))
                     :region            (non-blank (llm.settings/llm-bedrock-region))})
+    "custom"     (when (llm.settings/llm-custom-provider-enabled?)
+                   (let [api-key  (non-blank (llm.settings/llm-custom-provider-api-key))
+                         base-url (non-blank (llm.settings/llm-custom-provider-base-url))]
+                     (when (and api-key base-url)
+                       {:api-key api-key :base-url base-url})))
     "openai"     (configured-api-key-credentials (llm.settings/llm-openai-api-key))
     "openrouter" (configured-api-key-credentials (llm.settings/llm-openrouter-api-key))
     nil))
@@ -299,8 +304,8 @@
    (case provider
      "bedrock" (and (non-blank (:access-key-id credentials))
                     (non-blank (:secret-access-key credentials)))
-     "azure"   (and (non-blank (:api-key credentials))
-                    (non-blank (:base-url credentials)))
+     ("azure" "custom") (and (non-blank (:api-key credentials))
+                             (non-blank (:base-url credentials)))
      (non-blank (:api-key credentials)))))
 
 (defn- llm-provider-configured?

@@ -195,17 +195,20 @@
 
 (defn list-models
   "List available OpenAI models.
-  No-arg uses the configured API key. Opts map supports `:credentials` (`{:api-key ...}`) and `:ai-proxy?`."
+  No-arg uses the configured API key. Opts map supports `:credentials` (`{:api-key ...}`), `:base-url`, and `:ai-proxy?`."
   ([] (list-models {}))
   ([{:keys [credentials ai-proxy?]}]
    (when (and credentials (str/blank? (:api-key credentials)))
      (throw (core/missing-api-key-ex "OpenAI")))
    (try
-     (let [auth (core/resolve-auth "openai" "OpenAI"
-                                   (when-let [k (or (not-empty (:api-key credentials))
-                                                    (not-empty (llm/llm-openai-api-key)))]
-                                     {:url     (llm/llm-openai-api-base-url)
-                                      :headers {"Authorization" (str "Bearer " k)}})
+     (let [api-key (not-empty (or (and credentials (not-empty (:api-key credentials)))
+                                  (llm/llm-openai-api-key)))
+           base-url (or (and credentials (not-empty (:base-url credentials)))
+                        (llm/llm-openai-api-base-url))
+           auth (core/resolve-auth "openai" "OpenAI"
+                                   (when api-key
+                                     {:url     base-url
+                                      :headers {"Authorization" (str "Bearer " api-key)}})
                                    ai-proxy?)
            res  (core/request auth {:method  :get
                                     :url     "/v1/models"
@@ -255,14 +258,16 @@
 
 (mu/defn openai-raw
   "Perform a streaming request to OpenAI Responses API."
-  [{:keys [model ai-proxy?] :as opts
+  [{:keys [model ai-proxy?]
+    :as opts
     :or   {model "gpt-4.1-mini"}} :- core/LLMRequestOpts]
   (let [req (openai-request-body opts)]
     (try
-      (let [api-key  (not-empty (llm/llm-openai-api-key))
+      (let [api-key  (not-empty (or (:api-key opts) (llm/llm-openai-api-key)))
+            base-url (or (:base-url opts) (llm/llm-openai-api-base-url))
             auth     (core/resolve-auth "openai" "OpenAI"
                                         (when api-key
-                                          {:url     (llm/llm-openai-api-base-url)
+                                          {:url     base-url
                                            :headers {"Authorization" (str "Bearer " api-key)}})
                                         ai-proxy?)
             response (core/request auth

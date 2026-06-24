@@ -10,11 +10,13 @@
    [metabase.api.util.handlers :as handlers]
    [metabase.driver :as driver]
    [metabase.llm.anthropic :as llm.anthropic]
+   [metabase.llm.custom :as llm.custom]
    [metabase.llm.context :as llm.context]
    [metabase.llm.settings :as llm.settings]
    [metabase.metabot.core :as metabot]
    [metabase.metabot.self :as metabot.self]
    [metabase.metabot.settings :as metabot.settings]
+   [metabase.metabot.provider-util :as provider-util]
    [metabase.request.core :as request]
    [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
@@ -26,6 +28,15 @@
    (java.time.format DateTimeFormatter)))
 
 (set! *warn-on-reflection* true)
+
+(defn- provider-chat-completion
+  "Dispatch chat completion to the configured provider."
+  [{:keys [provider] :as opts}]
+  (case provider
+    ("custom" "openai") (llm.custom/chat-completion opts)
+    (throw (ex-info (tru "Unsupported LLM provider for SQL generation: {0}" provider)
+                    {:provider provider
+                     :status-code 400}))))
 
 (def ^:private sql-gen-throttlers
   "Throttlers for SQL generation endpoints.
@@ -195,14 +206,15 @@
                            [:model :string]
                            [:id pos-int?]]]]]
    request]
-  (when-not (llm.settings/llm-anthropic-api-key)
-    (throw (ex-info (tru "LLM SQL generation is not configured. Please set an Anthropic API key in admin settings.")
+  (when-not (metabot.settings/llm-metabot-configured?)
+    (throw (ex-info (tru "LLM SQL generation is not configured. Please configure an AI provider in admin settings.")
                     {:status-code 403})))
   (when-let [limit-msg (metabot/check-usage-limits!)]
     (throw (ex-info limit-msg {:status-code 429})))
   (throttle/with-throttling [(sql-gen-throttlers :ip-address) (request/ip-address request)
                              (sql-gen-throttlers :user-id)    api/*current-user-id*]
     (let [{:keys [prompt database_id source_sql referenced_entities]} body
+          provider (provider-util/provider-and-model->provider (metabot.settings/llm-metabot-provider))
           ;; 2. Extract table IDs from all sources and merge them
           frontend-table-ids (when (seq referenced_entities)
                                (->> referenced_entities
@@ -233,8 +245,9 @@
                                                          :source-sql           source_sql})
               start-timer          (u/start-timer)]
           (try
-            (let [{:keys [result usage duration-ms]} (llm.anthropic/chat-completion
-                                                      {:system   system-prompt
+            (let [{:keys [result usage duration-ms]} (provider-chat-completion
+                                                      {:provider provider
+                                                       :system   system-prompt
                                                        :messages [{:role "user" :content prompt}]})]
               (analytics/track-token-usage!
                {:snowplow            true
