@@ -30,6 +30,7 @@ RUN git config --global --add safe.directory /home/node
 RUN npm install -g bun
 
 # install frontend dependencies
+ENV CYPRESS_INSTALL_BINARY=0
 RUN bun install --frozen-lockfile
 
 RUN INTERACTIVE=false CI=true MB_EDITION=$MB_EDITION bin/build.sh :version ${VERSION}
