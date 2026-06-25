@@ -1,0 +1,43 @@
+name: Custom AI Provider CI
+
+on:
+  push:
+    branches:
+      - feature/custom-ai-provider
+      - feature/community-oidc
+  pull_request:
+    branches:
+      - feature/custom-ai-provider
+      - feature/community-oidc
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend-tests:
+    name: Backend Tests (custom provider)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Prepare back-end environment
+        uses: ./.github/actions/prepare-backend
+        with:
+          java-version: "21"
+
+      - name: Run custom provider tests
+        # NOTE: feature/community-oidc currently fails with EE aliases because
+        # upstream enterprise OIDC and community OIDC both register the
+        # :oidc-providers setting. Use OSS edition for community-oidc until that
+        # conflict is resolved.
+        run: >-
+          clojure -X:dev:ci:test:oss:oss-dev
+          :only '[metabase.llm.custom-provider-test metabase.metabot.self.custom-test]'
