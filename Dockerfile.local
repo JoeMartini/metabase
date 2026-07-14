@@ -1,0 +1,17 @@
+FROM eclipse-temurin:21-jre-alpine AS runner
+
+ENV FC_LANG=en-US LC_CTYPE=en_US.UTF-8
+
+COPY bin/docker/DigiCertGlobalRootG2.crt.pem /app/certs/DigiCertGlobalRootG2.crt.pem
+
+RUN apk add --no-cache bash fontconfig curl java-cacerts && \
+    mkdir -p /app/certs && \
+    /opt/java/openjdk/bin/keytool -noprompt -import -trustcacerts -alias azure-cert -file /app/certs/DigiCertGlobalRootG2.crt.pem -keystore /etc/ssl/certs/java/cacerts -keypass changeit -storepass changeit && \
+    mkdir -p /plugins && chmod a+rwx /plugins
+
+COPY dist/app.jar /app/metabase.jar
+COPY bin/docker/run_metabase.sh /app/
+
+EXPOSE 3000
+
+ENTRYPOINT ["/app/run_metabase.sh"]
