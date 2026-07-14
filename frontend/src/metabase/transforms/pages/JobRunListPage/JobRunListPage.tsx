@@ -2,8 +2,6 @@ import { useDisclosure, useElementSize } from "@mantine/hooks";
 import cx from "classnames";
 import type { Location } from "history";
 import { useCallback, useLayoutEffect, useMemo, useState } from "react";
-import { Link } from "react-router";
-import { replace } from "react-router-redux";
 import { t } from "ttag";
 
 import {
@@ -13,13 +11,14 @@ import {
 } from "metabase/api";
 import { LoadingAndErrorWrapper } from "metabase/common/components/LoadingAndErrorWrapper";
 import { PaginationControls } from "metabase/common/components/PaginationControls";
-import { DataStudioBreadcrumbs } from "metabase/data-studio/common/components/DataStudioBreadcrumbs";
+import { DataStudioBreadcrumbs } from "metabase/common/data-studio/components/DataStudioBreadcrumbs";
 import {
   PaneHeader,
   PanelHeaderTitle,
-} from "metabase/data-studio/common/components/PaneHeader";
+} from "metabase/common/data-studio/components/PaneHeader";
 import { usePageTitle } from "metabase/hooks/use-page-title";
 import { useDispatch } from "metabase/redux";
+import { Link, replace } from "metabase/router";
 import { POLLING_INTERVAL } from "metabase/transforms/constants";
 import { formatRunMethod, formatStatus } from "metabase/transforms/utils";
 import { Center, Flex, Group, Select, Stack } from "metabase/ui";
