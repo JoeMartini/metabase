@@ -25,7 +25,6 @@
    [metabase.lib.schema.id :as lib.schema.id]
    [metabase.lib.schema.metadata :as lib.schema.metadata]
    [metabase.lib.schema.template-tag :as lib.schema.template-tag]
-   [metabase.lib.types.isa :as lib.types]
    [metabase.metrics.core :as metrics]
    [metabase.models.interface :as mi]
    [metabase.models.serialization :as serdes]
@@ -48,7 +47,6 @@
    [metabase.util.embed :refer [maybe-populate-initially-published-at]]
    [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.i18n :refer [tru]]
-   [metabase.util.json :as json]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
    [methodical.core :as methodical]
@@ -252,7 +250,7 @@
       (try
         (prefetch-tables-for-cards! cards-with-non-empty-queries)
         (catch Throwable t
-          (log/errorf t "Failed prefetching cards `%s`." (pr-str (map :id cards-with-non-empty-queries))))))
+          (log/errorf "Failed prefetching cards `%s`: %s" (pr-str (map :id cards-with-non-empty-queries)) (ex-message t)))))
     (query-perms/with-card-instances (when (seq source-card-ids)
                                        (t2/select-fn->fn :id identity [:model/Card :id :collection_id :card_schema]
                                                          :id [:in source-card-ids]))
@@ -346,25 +344,35 @@
 
 (mu/defn populate-query-fields
   "Lift `database_id`, `table_id`, `query_type`, and `source_card_id` fields
-  from query definition when inserting/updating a Card."
-  [{query :dataset_query, :as card} :- ::queries.schema/card]
-  (merge
-   card
-   (when (and (seq query) (map? query))
-     (merge
-      ;; This used to be conditional on not nilling source-card-id, changed due to #68080.
-      {:source_card_id (source-card-id query)}
-      (when-let [{:keys [database-id table-id]} (query/query->database-and-table-ids query)]
-        ;; TODO -- not sure `query_type` is actually used for anything important anyway
-        (let [query-type (if (query/query-is-native? query)
-                           :native
-                           :query)]
-          (merge
-           {:query_type (keyword query-type)}
-           (when database-id
-             {:database_id database-id})
-           (when table-id
-             {:table_id table-id}))))))))
+  from query definition when inserting/updating a Card.
+
+  `clear-stale-table-id?` (default true) controls whether a nil derived table id overwrites an existing `:table_id`.
+  Pass false when the query itself is not changing, so that an unrelated update (rename, archive, ...) doesn't wipe
+  a previously-valid table_id just because the derivation can no longer resolve it (e.g. the source card was
+  deleted)."
+  ([card]
+   (populate-query-fields card true))
+  ([{query :dataset_query, :as card} :- ::queries.schema/card
+    clear-stale-table-id? :- :boolean]
+   (merge
+    card
+    (when (and (seq query) (map? query))
+      (merge
+       ;; This used to be conditional on not nilling source-card-id, changed due to #68080.
+       {:source_card_id (source-card-id query)}
+       (when-let [{:keys [database-id table-id]} (query/query->database-and-table-ids query)]
+         ;; TODO -- not sure `query_type` is actually used for anything important anyway
+         (let [query-type (if (query/query-is-native? query)
+                            :native
+                            :query)]
+           (merge
+            {:query_type (keyword query-type)}
+            ;; a stale table_id gets cleared when the query no longer has a source table (e.g. it was converted to
+            ;; native SQL), same as :source_card_id above
+            (when (or table-id clear-stale-table-id?)
+              {:table_id table-id})
+            (when database-id
+              {:database_id database-id})))))))))
 
 ;;; TODO -- move this to [[metabase.query-processor.card]] or Lib so the logic can be shared between the backend and
 ;;; frontend (?)
@@ -754,20 +762,17 @@
   Always returns `card`."
   [card]
   (when (= (:dataset_query card) {})
-    (log/infof "Card %d has a blank :dataset_query - this indicates a Metabase issue. Legacy MBQL: %s"
-               (:id card) (:legacy_query card))
+    (log/infof "Card %d has a blank :dataset_query - this indicates a Metabase issue."
+               (:id card))
     (let [uniques (swap! unique-cards-with-blank-dataset-query conj (:id card))]
       (analytics/set-gauge! :metabase-card/unique-cards-failed-conversion (count uniques))))
   ;; Always returns the original card.
   card)
 
-(defn- mbql5-conversion-clean-callback [untransformed-card pre-cleaning-query post-cleaning-query]
+(defn- mbql5-conversion-clean-callback [untransformed-card _pre-cleaning-query _post-cleaning-query]
   (analytics/inc! :metabase-card/conversions-requiring-cleaning)
-  (log/infof "MBQL 4->5 conversion for Card %d had real 'clean' changes from %s into %s; :legacy_query is %s"
-             (:id untransformed-card)
-             (pr-str (dissoc pre-cleaning-query :lib/metadata))
-             (pr-str (dissoc post-cleaning-query :lib/metadata))
-             (:legacy_query untransformed-card)))
+  (log/infof "MBQL 4->5 conversion for Card %d had real 'clean' changes"
+             (:id untransformed-card)))
 
 ;; Uses [[lib/with-card-clean-hook]] to bind a callback which logs the impact of the cleaning process during
 ;; `transform-out`, so that we can log whenever a card gets converted and [[lib.convert/clean]] makes material
@@ -844,6 +849,19 @@
         (card.metadata/populate-result-metadata changes))
       (m/update-existing :result_metadata #(some->> % (lib/normalize [:sequential ::lib.schema.metadata/lib-or-legacy-column])))))
 
+(defn- clear-metabot-origin
+  "A card edited after being saved from a Metabot conversation no longer materializes
+  the chart it was saved from, so sever the link back to its origin — the conversation
+  then stops showing that chart as saved. Only content edits count (query, display, viz
+  settings); renames, moves, and archiving keep the link. The Metabot save paths stamp
+  these columns with raw table updates, so stamping never re-enters this hook."
+  [card changes]
+  (if (and (some (partial contains? changes)
+                 [:dataset_query :display :visualization_settings])
+           (or (:metabot_conversation_id card) (:metabot_chart_id card)))
+    (assoc card :metabot_conversation_id nil :metabot_chart_id nil)
+    card))
+
 (t2/define-before-update :model/Card
   [{:keys [verified-result-metadata?] :as card}]
   (let [changes (some-> card t2/changes queries.schema/normalize-card)
@@ -855,8 +873,10 @@
         (apply-dashboard-question-updates changes)
         (m/update-existing :dataset_query lib-be/normalize-query)
         (populate-result-metadata changes verified-result-metadata?)
-        ;; populate-query-fields must run before pre-update in case source_card_id should be nilled
-        populate-query-fields
+        ;; populate-query-fields must run before pre-update in case source_card_id should be nilled.
+        ;; Only allow it to nil out a stale table_id when the query itself is changing.
+        (populate-query-fields (contains? changes :dataset_query))
+        (clear-metabot-origin changes)
         (pre-update changes)
         maybe-populate-initially-published-at)))
 
@@ -878,10 +898,6 @@
                                                                         :from   [:notification_card]
                                                                         :where  [:= :card_id id]}]))]
     (t2/delete! :model/Notification :id [:in notification-ids])))
-
-(defmethod serdes/hash-fields :model/Card
-  [_card]
-  [:name (serdes/hydrated-hash :collection) :created_at])
 
 (defmethod mi/exclude-internal-content-hsql :model/Card
   [_model & {:keys [table-alias]}]
@@ -1262,10 +1278,7 @@
     (try
       (update-associated-parameters! card-before-update card-updates)
       (catch Throwable e
-        (log/error e "Update of dependent card parameters failed!")
-        (log/debug e
-                   "`card-before-update`:" (pr-str card-before-update)
-                   "`card-updates`:" (pr-str card-updates))))
+        (log/errorf "Update of dependent card parameters failed!: %s" (ex-message e))))
     (collection/check-for-remote-sync-update card-before-update))
   ;; Fetch the updated Card from the DB
   (let [card (t2/select-one :model/Card :id (:id card-before-update))]
@@ -1388,7 +1401,7 @@
           ;; cache invalidation is instance-specific
           :cache_invalidated_at
           ;; those are instance-specific analytic columns
-          :view_count :last_used_at :initially_published_at
+          :view_count :initially_published_at
           ;; this is data migration column
           :dataset_query_metrics_v2_migration_backup
           ;; this column is not used anymore
@@ -1400,9 +1413,13 @@
           ;; always derivable from dataset_query by populate-query-fields; nil when not derivable
           :query_type
           ;; always re-derived from dataset_query by populate-query-fields on import
-          :table_id :source_card_id]
+          :table_id :source_card_id
+          ;; instance-specific Metabot origin (which conversation/chart the card was saved from)
+          :metabot_conversation_id :metabot_chart_id]
    :transform
    {:created_at             (serdes/date)
+    ;; exported so imported cards don't look freshly used to stale-content detection (GDGT-217)
+    :last_used_at           (serdes/date)
     ;; database_id is usually derivable from dataset_query, but must be kept when the query
     ;; is empty (e.g. a native card with no query yet) and database_id is the only reference.
     :database_id            (let [{:keys [import]} (serdes/fk :model/Database)]
@@ -1428,6 +1445,10 @@
               :archived_directly   false
               :collection_preview  true
               :enable_embedding    false}})
+
+(defmethod serdes/load-update! "Card" [_ ingested local]
+  ;; when the card already exists, its own usage history wins over the source's
+  (serdes/default-load-update! "Card" (dissoc ingested :last_used_at) local))
 
 (defn- card-deps
   "The serdes dependencies of a Card as `:serdes/meta` paths. `allow-int-ids?` selects raw-appdb vs serialized ref semantics for
@@ -1475,34 +1496,6 @@
 
 ;;;; ------------------------------------------------- Search ----------------------------------------------------------
 
-(mu/defn- dataset-query->dimensions :- [:maybe [:sequential ::lib.schema.metadata/column]]
-  "Extract dimensions (non-aggregation columns) from a dataset query."
-  [dataset-query-str :- [:maybe :string]]
-  (when dataset-query-str
-    ;; In production the :database should be always present and correct. That is not the case for some test mocks.
-    ;; As e.g. in [[metabase-enterprise.semantic-search.test-util/do-with-indexable-documents!]]. Hence the thorough
-    ;; checking.
-    (when-some [query (not-empty ((:out lib-be/transform-query) dataset-query-str))]
-      (let [columns (lib/returned-columns query)]
-        ;; Dimensions are columns that are not aggregations
-        (remove (comp #{:source/aggregations} :lib/source) columns)))))
-
-(defn- extract-temporal-info
-  "Compute has-temporal-dim and non-temporal-dim-ids in a single dataset-query->dimensions call.
-  Returns a map with snake_case keys so the ingestion layer can merge them directly into the document,
-  avoiding the cost of calling dataset-query->dimensions twice per card. See PR 60912.
-  Short-circuits for native queries: they have no returnable column metadata so temporal dims are always absent."
-  [{:keys [dataset_query query_type]}]
-  (if (= query_type "native")
-    {:has_temporal_dim false :non_temporal_dim_ids "[]"}
-    (let [dimensions   (dataset-query->dimensions dataset_query)
-          non-temp-ids (->> dimensions
-                            (remove lib.types/temporal?)
-                            (keep :id)
-                            sort)]
-      {:has_temporal_dim     (boolean (some lib.types/temporal? dimensions))
-       :non_temporal_dim_ids (json/encode (or (seq non-temp-ids) []))})))
-
 (defn- maybe-extract-native-query
   "Return the native SQL text (truncated to `max-searchable-value-length`) if `dataset_query` is native; else nil.
   Uses `query_type` to short-circuit without parsing JSON for non-native cards."
@@ -1538,10 +1531,7 @@
                   :display-type         :this.display
                   :collection-type      :collection.type
                   :collection-location  :collection.location
-                  :root-collection-type {:fn collection/root-collection-type}
-                  :temporal-info        {:fn       extract-temporal-info
-                                         :fields   [:dataset_query :query_type]
-                                         :provides [:has-temporal-dim :non-temporal-dim-ids]}}
+                  :root-collection-type {:fn collection/root-collection-type}}
    :search-terms [:name :description]
    :render-terms {:archived-directly          true
                   :collection-authority_level :collection.authority_level

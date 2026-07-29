@@ -33,7 +33,7 @@
     (try
       (json/decode+kw arguments)
       (catch Exception e
-        (log/warn e "Failed to decode tool call arguments" {:arguments arguments})
+        (log/warnf "Failed to decode tool call arguments: %s" (ex-message e))
         arguments))
     arguments))
 
@@ -183,7 +183,7 @@
 ;;; ──────────────────────────────────────────────────────────────────
 
 (defn build-system-message
-  "Build system message with templated prompt and enriched context.
+  "Build system message with templated prompt.
 
   Parameters:
   - context: Context map from API (with user_is_viewing, user_recently_viewed, etc.)
@@ -192,8 +192,10 @@
 
   Returns message map with {:role \"system\" :content \"...\"}."
   [context profile tools]
-  (let [enriched-context (user-context/enrich-context-for-template context)
-        content          (prompts/build-system-message-content
-                          profile enriched-context tools (:capabilities context))]
+  (let [content (prompts/build-system-message-content
+                 profile
+                 {:sql_dialect (user-context/extract-sql-dialect context)}
+                 tools
+                 (:capabilities context))]
     {:role    "system"
      :content content}))

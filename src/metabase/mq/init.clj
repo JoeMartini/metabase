@@ -3,7 +3,6 @@
   (:require
    [metabase.mq.listener :as listener]
    [metabase.mq.publish-buffer :as publish-buffer]
-   [metabase.mq.quartz-affinity :as quartz-affinity]
    [metabase.mq.queue.backend :as q.backend]
    [metabase.mq.queue.memory :as q.memory]
    [metabase.mq.queue.polling :as q.polling]
@@ -13,7 +12,7 @@
    [metabase.mq.task.outbox]
    [metabase.mq.task.queue-reaper]
    [metabase.startup.core :as startup]
-   [metabase.task.bootstrap :as task.bootstrap]
+   [metabase.task.core :as task]
    [metabase.util.log :as log]))
 
 (def ^:private queue-backends
@@ -21,11 +20,6 @@
    q.memory/backend-id q.memory/backend})
 
 (def ^:private valid-queue-backends (set (keys queue-backends)))
-
-;; Install the queue node-affinity Quartz DriverDelegate when Quartz's JDBC properties are set.
-;; Registered at load time — `mq` depends on `task`, not the reverse, so `task.bootstrap` calls this
-;; rather than referencing `mq`. install-delegate! falls back to the plain per-DB delegate if the affinity subclass can't be loaded.
-(task.bootstrap/register-jdbc-property-setter! quartz-affinity/install-delegate!)
 
 (defn- resolve-backend [label table kw-or-instance]
   (if (keyword? kw-or-instance)
@@ -59,13 +53,6 @@
     (log/infof "Queue backend: %s" queue-be)
     (q.registry/register-queues!)
     (listener/register-listeners!)
-    ;; With the Quartz backend, tell the affinity delegate which queues this node can handle, so it
-    ;; only acquires triggers for queues we have a listener for. Queried live, so dynamic
-    ;; register/unlisten is reflected. Harmless (never set) for non-Quartz backends, which have no
-    ;; queue jobs in the Quartz store.
-    (when (= q.quartz/backend-id (q.backend/backend-id queue-instance))
-      (quartz-affinity/set-capability-fn!
-       (fn [] (into #{} (map name) (listener/queue-names)))))
     (let [owns-buffer-flush? (publish-buffer/start-publish-buffer-flush!)
           owns-worker-pool?  (q.polling/start-worker-pool!)]
       (q.backend/start! queue-instance)
@@ -102,12 +89,33 @@
    (alter-var-root #'q.backend/*backend* (constantly prev-queue-be))))
 
 (defn- resolve-queue-be []
-  (let [queue-be (keyword "queue.backend" (mq.settings/queue-backend))]
+  (let [queue-be (or (some->> (mq.settings/queue-backend) (keyword "queue.backend"))
+                     (if (task/scheduler-disabled?)
+                       (do (log/warn (str "Task scheduler is disabled (MB_DISABLE_SCHEDULER); using the in-memory queue "
+                                          "backend. Queue messages will not survive a restart and are not shared "
+                                          "across nodes."))
+                           :queue.backend/memory)
+                       :queue.backend/quartz))]
     (when-not (contains? valid-queue-backends queue-be)
       (throw (ex-info (str "Invalid queue backend: " queue-be
                            ". Valid backends: " valid-queue-backends)
                       {:backend queue-be :valid valid-queue-backends})))
     queue-be))
+
+;; Misconfigurations must abort the boot here: a throw from ::MqStart (startup *logic*) is logged and
+;; swallowed, but a throw from a startup *validation* fails startup.
+(defmethod startup/def-startup-validation! ::MqBackendValidation [_]
+  (when-let [explicit (some->> (mq.settings/queue-backend) (keyword "queue.backend"))]
+    (when-not (contains? valid-queue-backends explicit)
+      (throw (ex-info (str "Invalid queue backend: " explicit
+                           ". Valid backends: " valid-queue-backends)
+                      {:backend explicit :valid valid-queue-backends})))
+    (when (and (= explicit :queue.backend/quartz) (task/scheduler-disabled?))
+      (throw (ex-info (str "The queue backend is explicitly set to `quartz` but the task scheduler is disabled "
+                           "(MB_DISABLE_SCHEDULER). Quartz queue messages would be accepted but never delivered. "
+                           "Unset MB_QUEUE_BACKEND to fall back to the in-memory backend, or re-enable the "
+                           "scheduler.")
+                      {:backend explicit :scheduler-disabled true})))))
 
 (defmethod startup/def-startup-logic! ::MqStart [_]
   (start! (resolve-queue-be)))

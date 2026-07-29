@@ -222,7 +222,7 @@
     (->> (index-size connectable table-name)
          (analytics/set-gauge! :metabase-search/semantic-index-size))
     (catch Exception e
-      (log/warn e "Failed to set :metabase-search/semantic-index-size metric"))))
+      (log/warnf "Failed to set :metabase-search/semantic-index-size metric: %s" (ex-message e)))))
 
 (defn- batch-update!
   [connectable table-name records->sql documents]
@@ -267,6 +267,8 @@
   When we do so we need to be sure any index names do not exceed the postgres limit for names. This function will hash the identifier
   if it exceeds the length, and will get a name like index_${sha1} instead.
 
+  Table names produced here must stay recognizable by [[index-table-name?]].
+
   Note: The index parameters will still be available in index_metadata"
   [identifier]
   (if (<= (count identifier) 63)
@@ -281,13 +283,39 @@
   (mod (.toEpochSecond (t/offset-date-time)) 10000000))
 
 (defn model-table-name
-  "Returns a default table name for a model. If the table name would exceed the 63 byte postgres limit, a hashed name is preferred."
+  "Returns a default table name for a model. If the table name would exceed the 63 byte postgres limit, a hashed name is preferred.
+
+  Table names produced here must stay recognizable by [[index-table-name?]]."
   [embedding-model]
   (let [{:keys [model-name provider vector-dimensions]} embedding-model
         provider-name (embedding/abbrev-provider-name provider)
         abbrev-model-name (embedding/abbrev-model-name model-name)
         ideal-table-name (str "index_" provider-name "_" abbrev-model-name "_" vector-dimensions)]
     (hash-identifier-if-exceeds-pg-limit ideal-table-name)))
+
+(def ^:private index-table-name-pattern
+  "Recognizes every table-name shape produced by [[model-table-name]] (optionally with the force-reset
+  suffix appended by [[metabase-enterprise.semantic-search.pgvector-api/fresh-index]]),
+  [[hash-identifier-if-exceeds-pg-limit]], and the legacy pre-BOT-337 naming era:
+
+    index_<provider>_<model>_<dims>            e.g. index_ais_text_3_sm_1536
+    index_<provider>_<model>_<dims>_<digits>   force-reset suffix ([[model-table-suffix]])
+    index_<40-hex-sha1>                        names exceeding the 63-byte pg identifier limit
+    index_table_<anything>                     legacy pre-BOT-337 naming (index_table_<provider>_<model>_<dims>)
+
+  The provider/model segments are only lightly sanitized (see [[embedding/abbrev-model-name]]), so no
+  character class is assumed for them; the trailing _<digits> (vector dimensions or force-reset suffix)
+  gives the modern shapes their structure, while the index_table_ prefix — used exclusively by the
+  legacy era — claims anything under it. Deliberately does NOT match the control-plane tables
+  (index_metadata, index_control, index_gate): no trailing _<digits>, not 40-hex, not index_table_."
+  #"\Aindex_(?:.+_\d+|[0-9a-f]{40}|table_.+)\z")
+
+(defn index-table-name?
+  "Does the bare (schema- and qualifier-stripped) table name look like a semantic-search index table?
+  Matching names are orphan-cleanup candidates, i.e. may be dropped if not registered in the metadata
+  table; see [[index-table-name-pattern]] for the shapes."
+  [bare-table-name]
+  (boolean (re-matches index-table-name-pattern bare-table-name)))
 
 (defn default-index
   "Returns the default index spec for a model."
@@ -307,9 +335,7 @@
                     (if embedding
                       (map #(assoc % :embedding embedding) (get text->docs text))
                       (when-let [docs (get text->docs text)]
-                        (log/warn "No embedding found for" (count docs) "documents with searchable text:"
-                                  {:searchable_text text
-                                   :document_count (count docs)}))))
+                        (log/warn "No embedding found for" (count docs) "documents"))))
                   text->embedding)]
       (batch-update!
        connectable
@@ -497,6 +523,12 @@
                          concurrently? (str/replace-first "CREATE INDEX " "CREATE INDEX CONCURRENTLY "))]
     (jdbc/execute! connectable (into [sql] params))))
 
+(defn drop-index-concurrently-if-exists!
+  "Drop `index-name` without blocking writes. Must run outside a transaction."
+  [connectable index-name]
+  (jdbc/execute! connectable
+                 [(str "DROP INDEX CONCURRENTLY IF EXISTS " (semantic.util/quote-table index-name))]))
+
 (defn create-index-table-if-not-exists!
   "Ensure that the index table exists and is ready to be populated. If
   force-reset? is true, drops and recreates the table if it exists.
@@ -560,7 +592,7 @@
   (def index (default-index embedding-model))
   (drop-index-table! db index)
   (create-index-table-if-not-exists! db index)
-  (jdbc/execute! db ["select table_name from INFORMATION_SCHEMA.tables where table_name like 'index_table_%'"]))
+  (jdbc/execute! db ["select table_name from INFORMATION_SCHEMA.tables where table_name like 'index\\_%'"]))
 
 (defn- personal-collection-filter
   "Generate a WHERE condition for personal collection filtering based on the filter type.
@@ -1130,7 +1162,7 @@
                       {:strategy strategy :plan-node (or (:node-type scan) "unknown")} 1)
       (assoc scan :prefilter-pool-size pool))
     (catch Exception e
-      (log/warn e "Failed to record vector-search instrumentation")
+      (log/warnf "Failed to record vector-search instrumentation: %s" (ex-message e))
       nil)))
 
 (defn- time-waterfall
@@ -1151,16 +1183,23 @@
         search-string (:search-string search-context)]
     (if (str/blank? search-string)
       {:results [] :raw-count 0}
-      (do
+      (let [index-name  (schema-qualified-index-name index (hnsw-index-name index))
+            index-state (when (contains? search.config/hnsw-index-backed-strategies
+                                         (vector-search-strategy search-context))
+                          (semantic.util/index-state db index-name))
+            search-context (cond-> search-context
+                             (= :building index-state) (assoc :vector-search-strategy :brute-force))]
         ;; `:vector-search-allow-missing-index?` is a deliberate opt-out for callers that want the inner
         ;; query to run without the HNSW index (e.g. the strategy matrix test probing the exact seq-scan
-        ;; path); production traffic leaves it unset and gets the fail-fast.
+        ;; path). A concurrent build also uses that exact path until PostgreSQL marks the index ready; an
+        ;; absent or abandoned invalid index fails fast.
         (when (and (contains? search.config/hnsw-index-backed-strategies (vector-search-strategy search-context))
                    (not (:vector-search-allow-missing-index? search-context))
-                   (not (semantic.util/index-exists? db (schema-qualified-index-name index (hnsw-index-name index)))))
-          (throw (ex-info (str "HNSW-index-backed vector-search strategy requested but no HNSW index exists. "
-                               "Set the semantic-search-vector-strategy setting to an index-backed strategy "
-                               "(:hnsw or :hnsw-iterative-*) to build it.")
+                   (contains? #{nil :invalid} index-state))
+          (throw (ex-info (str "HNSW-index-backed vector-search strategy requested but no usable HNSW index exists. "
+                               "The index is absent or was abandoned invalid. It will be rebuilt by the next "
+                               "maintenance pass; retry shortly, or pass :vector-search-allow-missing-index? true "
+                               "to bypass this check.")
                           {:table-name (:table-name index)
                            :strategy   (vector-search-strategy search-context)})))
         (let [timer (u/start-timer)

@@ -2,7 +2,6 @@
   (:require
    [clojure.string :as str]
    [metabase-enterprise.semantic-search.db.datasource :as semantic.db.datasource]
-   [metabase-enterprise.semantic-search.settings :as semantic.settings]
    [metabase.app-db.core :as mdb]
    [metabase.premium-features.core :as premium-features]
    [metabase.search.engine :as search.engine]
@@ -25,6 +24,15 @@
   Derived identifiers (index names, catalog lookups by `tablename`) must use this, never the full name."
   [table-name]
   (second (qualified-table-parts table-name)))
+
+(defn quote-table
+  "Quote a possibly schema-qualified `table-name` for raw SQL, quoting schema and table separately so it
+  renders as \"schema\".\"table\" rather than one identifier with a literal dot."
+  [table-name]
+  (let [[schema table] (qualified-table-parts table-name)]
+    (if schema
+      (str (quote-ident schema) "." (quote-ident table))
+      (quote-ident table))))
 
 (defn column-keyword
   "A `table.column` reference as a dotted-name keyword, not a namespaced one.
@@ -56,49 +64,73 @@
                            {:builder-fn jdbc.rs/as-unqualified-lower-maps})
         (:table_exists false))))
 
-(defn index-exists?
-  "Does an index named `index-name` exist in the pgvector DB's pg_indexes?
-  A schema-qualified (dotted) name matches only within its schema; an unqualified name matches any schema."
+(defn index-state
+  "Return the catalog state of `index-name`: `:ready`, `:building`, `:invalid`, or `nil` when absent.
+  A schema-qualified name matches only within its schema; an unqualified name matches any schema."
   [pgvector index-name]
-  (let [[schema index] (qualified-table-parts index-name)]
-    (-> (jdbc/execute-one! pgvector
-                           (if schema
-                             ["SELECT exists (select 1 FROM pg_indexes WHERE schemaname = ? AND indexname = ?) index_exists"
-                              schema index]
-                             ["SELECT exists (select 1 FROM pg_indexes WHERE indexname = ?) index_exists"
-                              index])
-                           {:builder-fn jdbc.rs/as-unqualified-lower-maps})
-        (:index_exists false))))
+  (let [[schema index] (qualified-table-parts index-name)
+        columns      (str "x.indisready AS is_ready, x.indisvalid AS is_valid, "
+                          "EXISTS (SELECT 1 FROM pg_stat_progress_create_index p "
+                          "        WHERE p.index_relid = i.oid) AS is_building")]
+    (when-some [{:keys [is_ready is_valid is_building]}
+                (jdbc/execute-one! pgvector
+                                   (if schema
+                                     [(str "SELECT " columns " "
+                                           "FROM pg_class i "
+                                           "JOIN pg_namespace n ON n.oid = i.relnamespace "
+                                           "JOIN pg_index x ON x.indexrelid = i.oid "
+                                           "WHERE n.nspname = ? AND i.relname = ?")
+                                      schema index]
+                                     [(str "SELECT " columns " "
+                                           "FROM pg_class i "
+                                           "JOIN pg_index x ON x.indexrelid = i.oid "
+                                           "WHERE i.relname = "
+                                           "? "
+                                           "ORDER BY CASE "
+                                           "WHEN x.indisready AND x.indisvalid THEN 0 "
+                                           "WHEN EXISTS (SELECT 1 FROM pg_stat_progress_create_index p "
+                                           "             WHERE p.index_relid = i.oid) THEN 1 "
+                                           "ELSE 2 END "
+                                           "LIMIT 1")
+                                      index])
+                                   {:builder-fn jdbc.rs/as-unqualified-lower-maps})]
+      (cond
+        (and is_ready is_valid) :ready
+        is_building             :building
+        :else                   :invalid))))
+
+(defn index-exists?
+  "Whether `index-name` is ready and valid. See [[index-state]]."
+  [pgvector index-name]
+  (= :ready (index-state pgvector index-name)))
+
+(defn index-needs-build?
+  "Whether `index-name` is absent or invalid with no concurrent build in progress."
+  [pgvector index-name]
+  (contains? #{nil :invalid} (index-state pgvector index-name)))
 
 (defn semantic-search-configured?
   "Whether to schedule the semantic-search Quartz jobs at startup.
   True when the `:semantic-search` feature is present and a pgvector store might exist: a dedicated
-  MB_PGVECTOR_DB_URL, or a Postgres app DB that [[semantic-search-capable?]] can probe to answer for sure.
+  MB_PGVECTOR_DB_URL, or a Postgres app DB that [[semantic-search-available?]] can probe to answer for sure.
   Cheap and infallible by contract -- it runs at boot and never queries the DB."
   []
   ;; The license is in this boot gate, not only the per-execution gates, so an unlicensed instance's
   ;; scheduler stays free of no-op jobs. The asymmetry is deliberate: removing the feature at runtime lets
   ;; the scheduled jobs no-op via semantic-search-active?, but adding it needs a restart before they
-  ;; schedule. The kill switch and engine activity stay per-execution so they never need one.
+  ;; schedule. Engine activity stays per-execution so it never needs one.
   (and (premium-features/has-feature? :semantic-search)
        (or (semantic.db.datasource/dedicated-url-configured?)
            (= :postgres (mdb/db-type)))))
 
-(defn semantic-search-capable?
+(defn semantic-search-available?
   "Does this instance have the infrastructure for semantic search: the premium feature and a pgvector DB.
-  Deliberately excludes the kill switch, which is checked per execution so it works at runtime."
+  Engine selection and hygiene tasks key off this."
   []
   ;; Feature first: the pgvector check may probe the app DB, and instances that can't use the answer
   ;; must never probe.
   (and (premium-features/has-feature? :semantic-search)
        (semantic.db.datasource/pgvector-configured?)))
-
-(defn semantic-search-available?
-  "Whether semantic search can run on this instance: capable and not disabled by the kill switch.
-  Engine selection, hygiene tasks, and metrics key off this."
-  []
-  (and (semantic-search-capable?)
-       (semantic.settings/semantic-search-enabled)))
 
 (defn semantic-search-active?
   "Is the semantic index being maintained on this instance?

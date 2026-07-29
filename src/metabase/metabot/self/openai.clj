@@ -242,11 +242,14 @@
   (when ai-proxy?
     (throw (ai-proxy-unsupported-ex)))
   (try
-    (let [auth (core/resolve-auth "openai" "OpenAI"
-                                  (when-let [k (or (not-empty (:api-key credentials))
-                                                   (not-empty (llm/llm-openai-api-key)))]
-                                    {:url     (llm/llm-openai-api-base-url)
-                                     :headers {"Authorization" (str "Bearer " k)}})
+    (let [api-key (not-empty (or (and credentials (not-empty (:api-key credentials)))
+                                 (llm/llm-openai-api-key)))
+          base-url (or (and credentials (not-empty (:base-url credentials)))
+                       (llm/llm-openai-api-base-url))
+          auth (core/resolve-auth "openai" "OpenAI"
+                                  (when api-key
+                                    {:url     base-url
+                                     :headers {"Authorization" (str "Bearer " api-key)}})
                                   ai-proxy?)
           res  (core/request auth {:method  :get
                                    :url     "/v1/models"
@@ -257,36 +260,8 @@
       (core/rethrow-api-error! "openai" openai-error-msg e))))
 
 (defn list-models
-<<<<<<< HEAD
-  "List available OpenAI models.
-  No-arg uses the configured API key. Opts map supports `:credentials` (`{:api-key ...}`), `:base-url`, and `:ai-proxy?`."
-  ([] (list-models {}))
-  ([{:keys [credentials ai-proxy?]}]
-   (when (and credentials (str/blank? (:api-key credentials)))
-     (throw (core/missing-api-key-ex "OpenAI")))
-   (try
-     (let [api-key (not-empty (or (and credentials (not-empty (:api-key credentials)))
-                                  (llm/llm-openai-api-key)))
-           base-url (or (and credentials (not-empty (:base-url credentials)))
-                        (llm/llm-openai-api-base-url))
-           auth (core/resolve-auth "openai" "OpenAI"
-                                   (when api-key
-                                     {:url     base-url
-                                      :headers {"Authorization" (str "Bearer " api-key)}})
-                                   ai-proxy?)
-           res  (core/request auth {:method  :get
-                                    :url     "/v1/models"
-                                    :as      :json
-                                    :headers {"Content-Type" "application/json"}})]
-       {:models (mapv (fn [model]
-                        {:id           (:id model)
-                         :display_name (:id model)})
-                      (reverse (sort-by :created (get-in res [:body :data]))))})
-     (catch Exception e
-       (core/rethrow-api-error! "openai" openai-error-msg e)))))
-=======
   "List the OpenAI chat models supported by this adapter (see [[supported-models]]).
-  No-arg uses the configured API key. Opts map supports `:credentials` (`{:api-key ...}`) and `:ai-proxy?`.
+  No-arg uses the configured API key. Opts map supports `:credentials` (`{:api-key ...}`), `:base-url`, and `:ai-proxy?`.
   `:ai-proxy?` is not supported for OpenAI and throws when true."
   ([] (list-models {}))
   ([opts]
@@ -295,7 +270,6 @@
                  (sort-by :id)
                  (mapv (fn [{:keys [id]}]
                          {:id id :display_name (supported-models id)})))}))
->>>>>>> upstream/master
 
 (defn- model-supports-temperature?
   "Whether `model` accepts an explicit `temperature` parameter.

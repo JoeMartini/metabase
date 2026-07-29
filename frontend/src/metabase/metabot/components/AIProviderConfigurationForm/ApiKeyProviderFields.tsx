@@ -66,9 +66,11 @@ export const ApiKeyProviderFields = ({
   const onConnect = async () => {
     await updateMetabotSettings({
       provider: selectedProvider,
-      "api-key": localApiKey || null,
-      "base-url": selectedProvider === "custom" ? localBaseUrl || null : null,
-      model: connectedModel || null,
+      ...(localApiKey !== null && { "api-key": localApiKey || null }),
+      ...(selectedProvider === "custom" && {
+        "base-url": localBaseUrl || null,
+        model: connectedModel || null,
+      }),
     }).unwrap();
 
     setLocalApiKey(null);
@@ -83,17 +85,27 @@ export const ApiKeyProviderFields = ({
       : null;
   const { isMutating } = useAIProviderConfigurationContext(connectHandler);
 
-  const needsApiKey = !hasConfiguredSettingValue(apiKeySetting);
+  const hasVerifiedApiKey = updateMetabotSettingsResult.isSuccess;
+  const needsApiKey =
+    !hasConfiguredSettingValue(apiKeySetting) && !hasVerifiedApiKey;
   const { modelsQuery, credentialsError: savedCredentialsError } =
     useProviderModelsQuery(selectedProvider, { skip: needsApiKey });
   const credentialsError = hasDirtyApiKey ? undefined : savedCredentialsError;
+
+  const queriedModels = modelsQuery.currentData?.models ?? [];
+  const verifiedModels = updateMetabotSettingsResult.data?.models ?? [];
+  const models = queriedModels.length > 0 ? queriedModels : verifiedModels;
 
   const apiKeySettingValue = apiKeySetting?.value;
   const baseUrlSettingValue = baseUrlSetting?.value;
 
   useEffect(() => {
-    setLocalApiKey(null);
-    setLocalBaseUrl(null);
+    if (apiKeySettingValue) {
+      setLocalApiKey(null);
+    }
+    if (baseUrlSettingValue) {
+      setLocalBaseUrl(null);
+    }
   }, [apiKeySettingValue, baseUrlSettingValue]);
 
   const handleApiKeyChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -147,8 +159,8 @@ export const ApiKeyProviderFields = ({
         <ProviderModelPicker
           provider={selectedProvider}
           connectedModel={connectedModel}
-          models={modelsQuery.currentData?.models ?? []}
-          isLoading={modelsQuery.isLoading}
+          models={models}
+          isLoading={modelsQuery.isLoading && models.length === 0}
           loadError={modelsQuery.error}
           disabled={isEnvSetting || isMutating}
         />

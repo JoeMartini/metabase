@@ -65,8 +65,8 @@
                          exported (repr.resolve/export-query mp definition shared.content-store/default-store)]
                      (get-in exported ["stages" 0 (name definition-key)]))
                    (catch Exception e
-                     (log/warn e "Failed to export measure/segment definition to portable form"
-                               {:id (:id metadata) :key definition-key})
+                     (log/warn "Failed to export measure/segment definition to portable form"
+                               {:id (:id metadata) :key definition-key :error (ex-message e)})
                      nil)))))))
 
 (defn verified-review?
@@ -477,13 +477,14 @@
          (merge related)))))
 
 (defn cards-details
-  "Get the details of metrics or models as specified by `card-type` and `cards`
+  "Get the details of metrics, models, or questions as specified by `card-type` and `cards`
   from the database with ID `database-id` respecting `options`."
   [card-type database-id cards options]
   (let [mp (lib-be/application-database-metadata-provider database-id)
         detail-fn (case card-type
                     :metric metric-details
-                    :model card-details)]
+                    :model card-details
+                    :question card-details)]
     (lib.metadata/bulk-metadata mp :metadata/card (map :id cards))
     (map #(-> (detail-fn % mp (u/assoc-default options :field-values-fn identity))
               (assoc :type card-type))
@@ -620,10 +621,10 @@
         (throw (ex-info "Invalid measure_id format" {:agent-error? true :status-code 400})))
       {:structured-output (assoc (measure-or-segment-details :measure measure-id) :result-type :entity)})
     (catch Exception e
-      (let [{:keys [status-code agent-error?] :as data} (ex-data e)]
+      (let [{:keys [status-code agent-error?]} (ex-data e)]
         ;; Agent-facing errors (bad input, not-found) are expected; only log genuine failures.
         (when-not agent-error?
-          (log/error e "Failed to fetch measure details" data))
+          (log/errorf "Failed to fetch measure details: %s" (ex-message e)))
         (if (= status-code 404)
           {:output (ex-message e) :status-code 404}
           (metabot.tools.u/handle-agent-error e))))))
@@ -637,10 +638,10 @@
         (throw (ex-info "Invalid segment_id format" {:agent-error? true :status-code 400})))
       {:structured-output (assoc (measure-or-segment-details :segment segment-id) :result-type :entity)})
     (catch Exception e
-      (let [{:keys [status-code agent-error?] :as data} (ex-data e)]
+      (let [{:keys [status-code agent-error?]} (ex-data e)]
         ;; Agent-facing errors (bad input, not-found) are expected; only log genuine failures.
         (when-not agent-error?
-          (log/error e "Failed to fetch segment details" data))
+          (log/errorf "Failed to fetch segment details: %s" (ex-message e)))
         (if (= status-code 404)
           {:output (ex-message e) :status-code 404}
           (metabot.tools.u/handle-agent-error e))))))

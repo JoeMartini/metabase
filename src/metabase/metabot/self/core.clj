@@ -4,6 +4,7 @@
    [clojure.java.io :as io]
    [clojure.string :as str]
    [clojure.walk :as walk]
+   [metabase.ai-tracing.core :as ait]
    [metabase.llm.settings :as llm]
    [metabase.metabot.schema.v2 :as schema.v2]
    [metabase.premium-features.core :as premium-features]
@@ -113,7 +114,7 @@
 
                 :else
                 (do
-                  (log/warn "SSE unexpected line" {:line line})
+                  (log/warn "SSE unexpected line" {:line-len (count line)})
                   (recur acc)))
               acc)))))
 
@@ -227,6 +228,10 @@
 ;; events (see `:metabase.metabot.schema.v2/ui-message-chunk`), one per
 ;; `data: {json}` line, terminated by `data: [DONE]`.
 
+(def done-sse-line
+  "AI SDK stream terminator line."
+  "data: [DONE]\n")
+
 (defn format-sse-event
   "Format a payload map as an SSE event line: data: {JSON}\\n. The streaming
   writer appends another newline, forming the blank-line event boundary."
@@ -247,7 +252,7 @@
   [error-part]
   (str (format-error-line error-part) "\n"
        (format-sse-event {:type "finish" :finishReason "error"}) "\n"
-       "data: [DONE]\n\n"))
+       done-sse-line "\n"))
 
 (defn- ->message-metadata
   "Translate accumulated per-model usage into the `finish` event's message
@@ -308,8 +313,9 @@
   non-text part (or end of stream) closes the open block first.
 
   Options:
-    :message-id - When set, force this id into the `start` event so the client
-                  sees the same id we persist as `metabot_message.external_id`.
+    :message-id       - When set, force this id into the `start` event so the client
+                        sees the same id we persist as `metabot_message.external_id`.
+    :message-metadata - When set, emitted as the `start` event's `messageMetadata`.
 
   Input types and their SSE events:
     :start (1st)      -> start + start-step
@@ -324,7 +330,7 @@
     :finish           -> (ignored — the completion arity emits the finish)
     completion        -> [text-end]? finish-step + finish + [DONE]"
   ([] (parts->aisdk-sse-xf nil))
-  ([{:keys [message-id]}]
+  ([{:keys [message-id message-metadata]}]
    (fn [rf]
      (let [error?            (volatile! false)
            finish-error-code (volatile! nil)
@@ -333,6 +339,10 @@
            ;; non-nil while a text block is open; holds the block id so we can
            ;; emit a matching text-end when the block closes
            current-text-id   (volatile! nil)
+           start-event       (fn [id]
+                               (format-sse-event
+                                (cond-> {:type "start" :messageId id}
+                                  message-metadata (assoc :messageMetadata message-metadata))))
            close-text-block  (fn [result]
                                (if-let [id @current-text-id]
                                  (do (vreset! current-text-id nil)
@@ -343,8 +353,7 @@
                                  result
                                  (do (vreset! started? true)
                                      (-> result
-                                         (rf (format-sse-event {:type      "start"
-                                                                :messageId (or message-id (mkid))}))
+                                         (rf (start-event (or message-id (mkid))))
                                          (rf (format-sse-event {:type "start-step"}))))))]
        (fn
          ([] (rf))
@@ -358,7 +367,7 @@
                      (cond-> {:type         "finish"
                               :finishReason (if @error? "error" "stop")}
                        (seq metadata) (assoc :messageMetadata metadata))))
-                (rf "data: [DONE]\n")
+                (rf done-sse-line)
                 (rf))))
          ([result part]
           ;; Any non-text part implicitly closes the current text block before
@@ -376,8 +385,7 @@
                 (do
                   (vreset! started? true)
                   (-> result
-                      (rf (format-sse-event {:type      "start"
-                                             :messageId (or message-id (:id part) (mkid))}))
+                      (rf (start-event (or message-id (:id part) (mkid))))
                       (rf (format-sse-event {:type "start-step"})))))
 
               :text
@@ -525,35 +533,41 @@
 
   Chunks have a ::duration-ms key added for internal use which is not part of the aisdk spec."
   [tool-call-id tool-name tool chunks]
-  (with-span :info {:name         :metabot.agent/run-tool
-                    :tool-name    tool-name
-                    :tool-call-id tool-call-id}
-    (let [start-ms (u/start-timer)
-          assoc-ms (fn [duration-ms]
-                     (fn [chunk]
-                       (cond-> chunk
-                         (= (:type chunk) :tool-output-available) (assoc ::duration-ms duration-ms))))
-          results  (try
-                     (let [{:keys [arguments]} (into {} (aisdk-xf) chunks)
-                           arguments (or (coerce-stringified-json arguments) {})
-                           decode    (tool-decode-fn tool)
-                           arguments (cond-> arguments decode decode)]
-                       (log/debug "Executing tool" {:tool-name tool-name :arguments arguments})
-                       (let [tool-fn (tool-call-fn tool)
-                             result  (tool-fn arguments)]
-                         (log/debug "Tool returned" {:tool-name tool-name :result-type (type result)})
-                         (collect-tool-result tool-call-id tool-name result)))
-                     (catch Exception e
-                       (if (:agent-error? (ex-data e))
-                         (log/debugf "Tool %s: agent validation error: %s" tool-name (ex-message e))
-                         (log/warn e "Tool execution failed" {:tool-name tool-name}))
-                       [{:type         :tool-output-available
-                         :toolCallId   tool-call-id
-                         :toolName     tool-name
-                         :error        {:message (concise-tool-error e)
-                                        :type    (str (type e))}}]))]
-      (mapv (assoc-ms (u/since-ms start-ms))
-            results))))
+  (ait/with-tool-call {:ai/tool-name    tool-name
+                       :ai/tool-call-id tool-call-id}
+    (with-span :info {:name         :metabot.agent/run-tool
+                      :tool-name    tool-name
+                      :tool-call-id tool-call-id}
+      (let [start-ms (u/start-timer)
+            assoc-ms (fn [duration-ms]
+                       (fn [chunk]
+                         (cond-> chunk
+                           (= (:type chunk) :tool-output-available) (assoc ::duration-ms duration-ms))))
+            results  (try
+                       (let [{:keys [arguments]} (into {} (aisdk-xf) chunks)
+                             arguments (or (coerce-stringified-json arguments) {})
+                             decode    (tool-decode-fn tool)
+                             arguments (cond-> arguments decode decode)]
+                         (log/debug "Executing tool" {:tool-name tool-name})
+                         (when (ait/capture-active?)
+                           (ait/record! {:ai/tool-args arguments}))
+                         (let [tool-fn (tool-call-fn tool)
+                               result  (tool-fn arguments)]
+                           (log/debug "Tool returned" {:tool-name tool-name :result-type (type result)})
+                           (collect-tool-result tool-call-id tool-name result)))
+                       (catch Exception e
+                         (if (:agent-error? (ex-data e))
+                           (log/debugf "Tool %s: agent validation error: %s" tool-name (ex-message e))
+                           (log/warn "Tool execution failed" {:tool-name tool-name :error (ex-message e)}))
+                         [{:type         :tool-output-available
+                           :toolCallId   tool-call-id
+                           :toolName     tool-name
+                           :error        {:message (concise-tool-error e)
+                                          :type    (str (type e))}}]))]
+        (when (ait/capture-active?)
+          (ait/record! {:ai/tool-output results}))
+        (mapv (assoc-ms (u/since-ms start-ms))
+              results)))))
 
 (defn tool-executor-xf
   "Transducer that executes tool calls in parallel on virtual threads.
@@ -725,15 +739,16 @@
 
 (def ^:private auth-error-statuses
   "Statuses whose upstream body may carry provider-side auth/account detail
-  (raw API keys, org/account names, tenant IDs). The full body still hits the
-  warn log; we just don't splice it into the message the caller sees."
+  (raw API keys, org/account names, tenant IDs). For these we don't splice a
+  body preview into the message the caller sees."
   #{401 403})
 
 (defn rethrow-api-error!
   "Rethrow a provider HTTP exception with a translated, user-facing message.
   `res->message` receives the decoded response map and returns the provider-specific message.
   A body preview is appended to the message except on 401/403 (see [[auth-error-statuses]]),
-  where the body may carry sensitive auth/account detail; the full body is still logged.
+  where the body may carry sensitive auth/account detail. The warn log carries provider and
+  status only — response bodies are never logged; the full body travels on the thrown ex-data.
   ex-data is an explicit allow-list of `:status`, `:reason-phrase`, `:headers`, `:body`, plus provider tags.
   Exceptions already tagged `:api-error true` are rethrown unchanged."
   [provider res->message ^Throwable e]
@@ -749,11 +764,8 @@
                       (body-preview (:body res)))
             msg     (cond-> base
                       preview (str " — " preview))]
-        ;; warnf (not warn) so the body renders into the message string, not as MDC.
-        ;; body-for-log caps the pr-str so a near-cap slurped stream can't flood the logs;
-        ;; the full body still survives in ex-data below.
-        (log/warnf "Provider API request failed: provider=%s status=%s body=%s"
-                   provider (:status res) (body-for-log (:body res)))
+        (log/warnf "Provider API request failed: provider=%s status=%s"
+                   provider (:status res))
         ;; Allow-list explicitly — clj-http responses carry :http-client (a Closeable),
         ;; :trace-redirects, :orig-content-encoding, etc., none of which should propagate downstream.
         ;; :headers is included so the retry path in metabase.metabot.self/parse-retry-after-header
