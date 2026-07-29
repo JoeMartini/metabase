@@ -1,13 +1,12 @@
 import type { ReactNode } from "react";
-import { Link } from "react-router";
 import { t } from "ttag";
 
 import { EditableText } from "metabase/common/components/EditableText";
+import { LinkTab } from "metabase/common/components/LinkTab";
 import { UpsellGem } from "metabase/common/components/upsells/components/UpsellGem";
 import { MetabotDataStudioButton } from "metabase/metabot/components/MetabotDataStudioButton";
 import { AppSwitcher } from "metabase/nav/components/AppSwitcher";
-import { useSelector } from "metabase/redux";
-import { getLocation } from "metabase/selectors/routing";
+import { useLocation } from "metabase/router";
 import {
   Box,
   Button,
@@ -16,6 +15,7 @@ import {
   Group,
   Stack,
   type StackProps,
+  Tabs,
   Tooltip,
 } from "metabase/ui";
 import type { IconName } from "metabase-types/api";
@@ -134,40 +134,35 @@ export function PaneHeaderInput({
 
 type PaneHeaderTabsProps = {
   tabs: PaneHeaderTab[];
-  withBackground?: boolean;
 };
 
-export function PaneHeaderTabs({ tabs, withBackground }: PaneHeaderTabsProps) {
-  const { pathname } = useSelector(getLocation);
-  const backgroundColor = withBackground
-    ? "background_page-secondary"
-    : "transparent";
+function isTabSelected(tab: PaneHeaderTab, pathname: string) {
+  const { to, isSelected } = tab;
+  return typeof isSelected === "function"
+    ? isSelected(pathname)
+    : (isSelected ?? to === pathname);
+}
+
+export function PaneHeaderTabs({ tabs }: PaneHeaderTabsProps) {
+  const { pathname } = useLocation();
+  const activeTab = tabs.find((tab) => isTabSelected(tab, pathname));
 
   return (
-    <Group gap="sm">
-      {tabs.map(({ label, to, icon, isGated, isSelected }) => {
-        const selected =
-          typeof isSelected === "function"
-            ? isSelected(pathname)
-            : (isSelected ?? to === pathname);
-        return (
-          <Button
+    <Tabs variant="pills" value={activeTab?.to ?? null}>
+      <Tabs.List>
+        {tabs.map(({ label, to, icon, isGated }) => (
+          <LinkTab
             key={label}
-            component={Link}
+            value={to}
             to={to}
-            size="sm"
-            radius="xl"
-            c={selected ? "core-brand" : undefined}
-            bg={selected ? "background_surface-selected" : backgroundColor}
-            bd="none"
             leftSection={icon != null ? <FixedSizeIcon name={icon} /> : null}
             rightSection={isGated ? <UpsellGem.New size={14} /> : null}
           >
             {label}
-          </Button>
-        );
-      })}
-    </Group>
+          </LinkTab>
+        ))}
+      </Tabs.List>
+    </Tabs>
   );
 }
 
